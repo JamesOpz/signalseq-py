@@ -1,7 +1,9 @@
-"""Downsampling / sequencing-saturation curve (CellRanger/10x style): fixed
-called-cell set, subsample raw (pre-collapse) reads at increasing fractions,
-recompute per-cell complexity at each depth. Reuses the per-read arrays already
-held in memory right after the hot loop -- no extra FASTQ pass needed.
+"""Downsampling / sequencing-saturation curve, CellRanger style.
+
+The called-cell set is fixed (taken from the full-depth call), raw pre-collapse
+reads are subsampled at increasing fractions, and per-cell complexity is
+recomputed at each depth. This reuses the per-read arrays already in memory
+right after the read scan, so no extra FASTQ pass is needed.
 """
 
 from __future__ import annotations
@@ -9,21 +11,19 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from . import config
+from .encoding import Encoder
 from .umi_dedup import collapse_umis
 
 
-def compute_saturation_curve(cell_id_arr: np.ndarray, adt_idx_arr: np.ndarray, umi_packed_arr: np.ndarray,
-                              called_cell_ids: np.ndarray,
-                              fractions=config.SATURATION_FRACTIONS,
-                              seed: int = config.SATURATION_SEED) -> pd.DataFrame:
-    """called_cell_ids: packed cell ids of the knee-called cells (fixed cell set
-    across all subsampling depths, from the full-depth call).
-
-    Returns a DataFrame with one row per fraction: fraction, n_reads,
-    mean_reads_per_cell, median_umis_per_cell, median_adts_detected_per_cell,
-    sequencing_saturation.
-    """
+def compute_saturation_curve(cell_id_arr: np.ndarray, adt_idx_arr: np.ndarray,
+                             umi_packed_arr: np.ndarray,
+                             called_cell_ids: np.ndarray,
+                             encoder: Encoder,
+                             umi_cfg: dict,
+                             fractions,
+                             seed: int) -> pd.DataFrame:
+    """One row per fraction: reads used, mean reads/cell, median UMIs/cell,
+    median ADTs detected/cell, and sequencing saturation."""
     called_set = np.isin(cell_id_arr, called_cell_ids)
     cell_id_c = cell_id_arr[called_set]
     adt_idx_c = adt_idx_arr[called_set]
@@ -44,14 +44,14 @@ def compute_saturation_curve(cell_id_arr: np.ndarray, adt_idx_arr: np.ndarray, u
             sub_idx = rng.choice(n_reads_total, size=n_sub, replace=False)
 
         cell_sub, adt_sub, count_sub = collapse_umis(
-            cell_id_c[sub_idx], adt_idx_c[sub_idx], umi_c[sub_idx]
+            cell_id_c[sub_idx], adt_idx_c[sub_idx], umi_c[sub_idx], encoder, umi_cfg
         )
 
         pos = np.searchsorted(sorted_called_ids, cell_sub)
         per_cell_umi = np.zeros(n_called_cells, dtype=np.int64)
         per_cell_adt = np.zeros(n_called_cells, dtype=np.int64)
         np.add.at(per_cell_umi, pos, count_sub)
-        np.add.at(per_cell_adt, pos, 1)  # one distinct ADT detected per row
+        np.add.at(per_cell_adt, pos, 1)   # one distinct ADT detected per row
 
         n_unique_molecules = int(count_sub.sum())
         saturation = 1.0 - (n_unique_molecules / n_sub) if n_sub > 0 else np.nan

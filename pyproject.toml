@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "signalseq"
+version = "0.1.0"
+description = "YAML-driven ADT (antibody-derived tag) quantification for SIGNAL-seq / Parse Evercode libraries"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "James Opzoomer" }]
+keywords = ["single-cell", "ADT", "CITE-seq", "Parse Biosciences", "SIGNAL-seq"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scipy>=1.10",
+    "anndata>=0.10",
+    "scanpy>=1.10",
+    "numba>=0.58",
+    "matplotlib>=3.7",
+    "PyYAML>=6.0",
+    "h5py>=3.8",
+]
+
+[project.optional-dependencies]
+# CLR normalisation + PHATE embedding. Needed for `qc.analysis.enabled: true`
+# (the default); a counts-only run works without them.
+analysis = ["muon>=0.1.5", "phate>=1.0"]
+test = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "muon>=0.1.5", "phate>=1.0"]
+
+[project.scripts]
+signalseq = "signalseq.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/JamesOpz/signalseq-py"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
