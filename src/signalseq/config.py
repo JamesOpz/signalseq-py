@@ -60,6 +60,7 @@ DEFAULTS: dict[str, Any] = {
             "enabled": True,
             "n_pcs": 10,
             "pca_svd_solver": "arpack",
+            "pca_random_state": 0,
             "phate": {"n_components": 2, "knn": 15, "decay": 40, "t": "auto", "random_state": 42},
         },
         "plots": {
@@ -99,12 +100,25 @@ DEFAULTS: dict[str, Any] = {
         },
     },
     "performance": {"chunk_rows": 25_000_000, "gzip_binaries": ["libdeflate-gzip", "gzip"]},
-    # Set true only by the post-verification bugfix pass; see compatibility.py
-    # for exactly what each flag changes.
-    "compatibility": {
-        "fix_valid_cell_barcode_counter": False,
-        "fix_missing_timepoint_label": False,
-    },
+}
+
+KNOWN_SECTIONS = frozenset({
+    "schema_version", "run", "inputs", "read_structure", "matching",
+    "filtering", "qc", "sample_annotation", "outputs", "performance",
+})
+
+# Sections that existed in an earlier release and were deliberately removed.
+# Silently ignoring one would be dangerous: a config still setting
+# `compatibility.reproduce_original` would appear to request the old behaviour
+# and quietly get the new behaviour instead.
+REMOVED_SECTIONS = {
+    "compatibility": (
+        "The compatibility shims were removed once the two ported defects were "
+        "fixed unconditionally. `valid_cell_barcode` now counts every read whose "
+        "barcode resolves, and an unparseable timepoint uses "
+        "sample_annotation.unassigned_label instead of '<NA>'. Delete this "
+        "section. To reproduce a pre-fix result, use an earlier release."
+    ),
 }
 
 _VALID_UMI_METHODS = ("directional", "exact")
@@ -212,10 +226,6 @@ class Config:
     def sample_annotation(self) -> dict:
         return self.raw["sample_annotation"]
 
-    @property
-    def compatibility(self) -> dict:
-        return self.raw["compatibility"]
-
     def sublibrary(self, name: str) -> Sublibrary:
         for s in self.sublibraries:
             if s.name == name:
@@ -295,6 +305,8 @@ def load_config(path: str | Path) -> Config:
             f"schema_version: this build understands version {SCHEMA_VERSION}, "
             f"config declares {declared!r}"
         )
+
+    _check_sections(user)
 
     raw = _deep_merge(DEFAULTS, user)
     base = path.parent
@@ -417,6 +429,24 @@ def load_config(path: str | Path) -> Config:
     return cfg
 
 
+def _check_sections(user: Mapping) -> None:
+    """Reject unknown or removed top-level sections.
+
+    A mistyped or obsolete section that is merely ignored is worse than one that
+    errors: the run appears to honour it.
+    """
+    for key in user:
+        if key in REMOVED_SECTIONS:
+            raise ConfigError(f"{key}: this section no longer exists. {REMOVED_SECTIONS[key]}")
+    unknown = sorted(set(user) - KNOWN_SECTIONS)
+    if unknown:
+        raise ConfigError(
+            f"Unknown config section(s) {unknown}. Valid sections are "
+            f"{sorted(KNOWN_SECTIONS)}. Check for a typo -- an unrecognised "
+            f"section would otherwise be silently ignored."
+        )
+
+
 def _validate_matching(m: Mapping) -> None:
     adt = m.get("adt") or {}
     mm = adt.get("max_mismatches")
@@ -509,6 +539,11 @@ def _validate_qc(q: Mapping) -> None:
     n_pcs = an.get("n_pcs")
     if not isinstance(n_pcs, int) or isinstance(n_pcs, bool) or n_pcs < 1:
         raise ConfigError(f"qc.analysis.n_pcs: expected an integer >= 1, got {n_pcs!r}")
+    seed = an.get("pca_random_state")
+    if not isinstance(seed, int) or isinstance(seed, bool) or seed < 0:
+        raise ConfigError(
+            f"qc.analysis.pca_random_state: expected an integer >= 0, got {seed!r}"
+        )
 
     pl = q.get("plots") or {}
     pct = pl.get("color_percentiles") or []

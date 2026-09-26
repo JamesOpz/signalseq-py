@@ -163,6 +163,10 @@ qc:
     enabled: true            # false == counts + core QC only (skips muon/phate)
     n_pcs: 10
     pca_svd_solver: arpack
+    # Pinned explicitly: ARPACK's result depends on its starting vector, so
+    # leaving this to the library default lets a scanpy/scipy upgrade shift the
+    # PCA and, through it, the PHATE embedding.
+    pca_random_state: 0
     phate:
       n_components: 2
       knn: 15
@@ -213,9 +217,3 @@ outputs:
 performance:
   chunk_rows: 25000000       # per-chunk numpy buffer in the read scan
   gzip_binaries: [libdeflate-gzip, gzip]   # tried in order, then python gzip
-
-# Defects found while porting the original pipeline. false = reproduce the
-# original exactly. See src/signalseq/compatibility.py for what each changes.
-compatibility:
-  fix_valid_cell_barcode_counter: false
-  fix_missing_timepoint_label: false

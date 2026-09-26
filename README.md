@@ -28,16 +28,6 @@ offsets and lengths.
   `phate`). Without it, set `qc.analysis.enabled: false` to write counts and
   core QC only.
 
-### A note on numerical reproducibility
-
-Counts are **bit-exact** regardless of environment: barcode matching and UMI
-collapse are integer operations in this package. The downstream CLR / PCA /
-PHATE numbers are only bit-reproducible within a **fixed dependency set** —
-patch-level changes in `numpy` or `muon` move CLR values by ~5e-7, which
-amplifies through PCA into the PHATE embedding. If you need to compare embeddings
-across machines or over time, pin your environment. `provenance.json` records the
-versions actually used for every run.
-
 ---
 
 ## Install
@@ -62,24 +52,104 @@ pytest                             # the test suite builds its own synthetic FAS
 
 ---
 
+## Reference files you need to supply
+
+**These are not in the repository** — they are licensed or experiment-specific
+data. Gather them first; the config names their paths. Column names are
+configurable, so yours need not match these, but the *shape* does.
+
+| File | Where it comes from | Shape |
+|---|---|---|
+| RT barcode table | Parse Biosciences pipeline (`bc_data_rt.csv`) | one row per barcode; columns for sequence, well, and optionally a sample-type code. All sequences the same length. |
+| Ligation barcode table | Parse Biosciences pipeline (`bc_data_ligation.csv`) | same shape. Parse v3 uses this one file for **both** ligation rounds. |
+| RT edit-distance dictionary | Parse Biosciences pipeline (`bc_dict_n99_v5.json`) | JSON, top-level keys `"0"`,`"1"`,`"2"`,… mapping an observed sequence to the list of true sequences at that edit distance. Optional — set `edit_distance_json: null` for exact matching only. |
+| Ligation edit-distance dictionary | Parse Biosciences pipeline (`bc_dict_R3_v3.json`) | same shape. Optional. |
+| ADT panel table | **you** — your antibody panel | one row per antibody; a column of tag sequences (all the same length) and a column of display names (must be unique; these become `var_names`). |
+| RT plate layout | **you** — your experiment | one row per used well; a well-ID column and a sample-name column. Wells you omit are labelled `Unassigned`. |
+
+A minimal ADT panel looks like:
+
+```csv
+Barcode,ADT_identifier,Antigen,Clone
+AAGGCAGACGGTGCA,ADT001,CD55,JS11
+GGCTGCGCACCGCCT,ADT002,Vimentin,RV202
+```
+
+and a minimal plate layout:
+
+```csv
+Well_ID,Sample_name
+A1,LineA_24hr_Dosed
+A2,LineA_VEHICLE_24hrs
+```
+
+Any extra columns in either file are carried through to `adata.var` / the
+annotation join, so there is no need to strip them.
+
+---
+
+## Shipped configs
+
+| File | Use it for |
+|---|---|
+| `configs/parse_v3.example.yaml` | **Start here for Parse Evercode WT v3.** Filled-in, working values; edit only the paths. |
+| `configs/annotated_template.yaml` | A teaching template. Every field explained inline, including what breaks if you set it wrong. Describes an invented chemistry to show that read layout, lengths, order and read assignment are all free — do not run it on v3 data. |
+
+---
+
 ## Quickstart
 
 ```bash
-# 1. Copy the example config somewhere OUTSIDE the repo and edit the paths.
+# 1. Copy the example config somewhere OUTSIDE the repo.
 cp configs/parse_v3.example.yaml ~/my_run.yaml
 
-# 2. Edit run.output_dir and everything under inputs: to point at your files.
+# 2. Edit run.output_dir (must be outside the repo) and every path under
+#    inputs: — the FASTQs, the barcode tables, the panel, the plate layout.
 
-# 3. Check the config and all inputs. Reads nothing but the first ~1000 reads
-#    per FASTQ; takes seconds.
+# 3. Check the config and all inputs. Opens only the first ~1000 reads per
+#    FASTQ, so it takes seconds.
 signalseq adt validate --config ~/my_run.yaml
 
-# 4. Run.
+# 4. Smoke-test on a slice before committing to a full run (~1 minute).
+signalseq adt run --config ~/my_run.yaml --sublibrary MY_SUBLIB --debug-reads 5000000
+
+# 5. Run everything, then aggregate.
 signalseq adt run-multi --config ~/my_run.yaml
 ```
 
 Always run `validate` first. It catches a missing file, an off-by-one offset or a
-barcode-length mismatch in seconds, rather than at minute 90 of a long run.
+barcode-length mismatch in seconds, rather than at minute 90 of a long run. Step 4
+is worth the minute: it exercises the whole pipeline, plots included.
+
+**Two things to know about small slices.** `--debug-reads 5000000` is not an
+arbitrary number:
+
+- The barcode census samples reads 3,000,000–4,000,000 by default
+  (`matching.cell_barcode.census.offset_reads` / `n_reads`). A slice shorter than
+  that leaves the census empty, which silently reduces barcode correction to
+  exact matching only. Either keep the slice above ~4M reads, or set
+  `offset_reads: 0`.
+- Cell-calling thresholds tuned for full depth will call very few cells from a
+  slice. If too few pass, CLR/PCA/PHATE is **skipped with a warning** — counts,
+  core QC and the remaining plots are still written — because a kNN embedding over
+  a handful of cells is meaningless. Lower `filtering.min_umi_per_cell` (or set it
+  to `null` for the detected knee) if you want the embedding on a small slice.
+
+### What to expect
+
+Rough figures from a 16 GB laptop, per sublibrary of ~225M read pairs:
+
+| Stage | Time | Peak memory |
+|---|---|---|
+| Barcode census | ~5 s | small |
+| Read scan | ~13 min (~290k reads/s) | ~2 GB |
+| UMI collapse | ~1 min | **~7 GB** (the high-water mark) |
+| Matrix, cell calling, plots | ~1 min | ~2 GB |
+| CLR + PCA + PHATE | ~4 min | ~2 GB |
+
+`run-multi` processes sublibraries **sequentially on purpose**: the UMI-collapse
+sort dominates peak memory, so running them concurrently risks swapping. Four
+sublibraries of this size take roughly 100 minutes end to end.
 
 ### The four commands
 
@@ -93,44 +163,6 @@ barcode-length mismatch in seconds, rather than at minute 90 of a long run.
 Useful flags: `--debug-reads N` caps the scan at N read pairs for a smoke test;
 `run-multi --continue-on-error` carries on if one sublibrary fails;
 `validate --skip-read-check` skips opening the FASTQs.
-
----
-
-## Outputs stay outside the repository
-
-`run.output_dir` **must resolve outside the git checkout**, and config validation
-refuses it otherwise:
-
-```
-run.output_dir resolves to /path/to/signalseq-py/outs/run1, which is inside the
-signalseq repository (/path/to/signalseq-py). Outputs, intermediates, logs and
-plots must live outside the repo so they can never be committed.
-```
-
-The reason is that outputs are both large and partly un-shareable. A single
-sublibrary produces hundreds of megabytes of `.h5ad`, and those matrices, the
-plots and the barcode-derived tables are all derived from sequencing data and
-from licensed Parse barcode whitelists. Keeping them out of the tree means they
-can never be committed by accident, so the repository stays shareable and small.
-The same applies to the reference files themselves: the Parse barcode CSVs and
-edit-distance dictionaries, the ADT panel table and the RT plate layout are named
-by the config and are **not** stored in this repository.
-
-A layout that works well:
-
-```
-~/analysis/
-  signalseq-py/              <- this repo, code only
-  reference/                 <- barcode whitelists, ADT panel, RT layout
-  runs/
-    2026_parse_v3_run_1/     <- run.output_dir
-  configs/
-    my_run.yaml
-```
-
-Relative paths inside a config resolve against **the config file's own
-directory**, not the shell's working directory, so a config and its reference
-files can be moved around together.
 
 ---
 
@@ -169,15 +201,10 @@ Cell barcode = rt * 96 * 96  +  bc2 * 96  +  bc3          (912,384 combinations)
 obs_names    = {sublibrary}_{rt}_{bc2}_{bc3}
 ```
 
-**Why the linkers are not checked.** The original pipeline skips them without
-inspecting them, and that is the right default here: `linker_bc2_rt` matches
-exactly in only ~76% of reads, because there is a common 1-mismatch variant
-(`TCCAATCACCTC`). An exact check would discard roughly a quarter of all reads.
-They are declared in the config so the layout is documented and so a future
-anchor-based locator has something to search for; `enabled: false` is what
-reproduces the original.
-
 ### Adapting to a different chemistry
+
+`configs/annotated_template.yaml` is a complete worked example of this, with every
+field explained inline. The short version:
 
 Suppose a custom chemistry with: a **12 bp** ADT tag on **R2** starting at base
 **5**; a **9 bp** UMI at the **end** of R2; and only **two** barcode rounds, on
@@ -236,9 +263,16 @@ Two constraints to be aware of:
 
 ## Config reference
 
-Any section may be omitted, in which case the defaults below apply — and those
-defaults reproduce the pipeline this package was ported from. `read_structure`
-and `inputs` have no useful defaults and are required.
+`configs/annotated_template.yaml` carries the same information as inline comments,
+which is often easier to work from while editing. The table here is the canonical
+list.
+
+Any section may be omitted, in which case the defaults below apply.
+`read_structure` and `inputs` have no useful defaults and are required.
+
+Relative paths inside a config resolve against **the config file's own
+directory**, not the shell's working directory, so a config and its reference
+files can be moved around together.
 
 ### `run`
 
@@ -339,6 +373,7 @@ barcode-rank curve.
 | `analysis.enabled` | bool | `true` | Run CLR + PCA + PHATE. False skips it and drops the `muon`/`phate` requirement. |
 | `analysis.n_pcs` | int | `10` | Principal components; capped at `n_vars - 1`. |
 | `analysis.pca_svd_solver` | str | `arpack` | Passed to scanpy. |
+| `analysis.pca_random_state` | int | `0` | Seed for the PCA solver, set explicitly because ARPACK's result depends on its starting vector. `0` matches scanpy's default. |
 | `analysis.phate.*` | map | `knn 15, decay 40, t auto, random_state 42` | Passed to PHATE, plus `n_jobs` from `run.threads`. |
 | `plots.enabled` | bool | `true` | Write figures. |
 | `plots.dpi` | int | `150` | Figure resolution. |
@@ -372,7 +407,7 @@ Sample names are parsed as three underscore-separated tokens:
 `{culture}_{control_token}_{timepoint}` for controls. Anything else gets
 treatment `Unknown` and a missing timepoint, rather than failing the run.
 
-### `outputs`, `performance`, `compatibility`
+### `outputs`, `performance`
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
@@ -386,7 +421,6 @@ treatment `Unknown` and a missing timepoint, rather than failing the run.
 | `outputs.aggregate.copy_best_saturation` | bool | `true` | Copy the best sublibrary's saturation curve into `combined/`. |
 | `performance.chunk_rows` | int | `25000000` | Rows per preallocated numpy buffer in the read scan. |
 | `performance.gzip_binaries` | list | `[libdeflate-gzip, gzip]` | Decompressors to try, in order. |
-| `compatibility.*` | bool | `false` | Opt-in fixes for defects carried over from the original pipeline. See `src/signalseq/compatibility.py`. |
 
 ---
 
@@ -440,52 +474,6 @@ everywhere else.
 
 ---
 
-## Troubleshooting
-
-**`run.output_dir resolves to … which is inside the signalseq repository`**
-Point `output_dir` somewhere outside the checkout. See *Outputs stay outside the
-repository*.
-
-**`run.output_dir is not empty`**
-A previous run is there. Use a fresh directory, or set `run.overwrite: true`.
-
-**`inputs.whitelists.X (file.csv) holds 8bp barcodes but read_structure.elements.Y.length is 7`**
-The declared length disagrees with the file. Fix whichever is wrong — usually the
-config. The same check applies to `adt_panel`.
-
-**`the read structure needs 58bp but 1000/1000 of the first reads are shorter (min 45bp). Element(s) running past the end: rt: R2 51..58`**
-An element runs off the end of the reads. Either the offsets are wrong for this
-chemistry, or the FASTQs are trimmed. Remember `start` is **1-based**: the first
-base is 1, not 0.
-
-**`read_structure: elements overlap on the same read`**
-Two elements' spans intersect — nearly always a typo in a `start` or `length`. If
-genuinely intended, set `allow_overlap: true` on one.
-
-**`This chemistry needs 68 bits to pack (cell, ADT, UMI) into one integer, over the 64-bit limit`**
-The combined cell space, panel size and UMI length don't fit. Shorten the UMI
-element or reduce whitelist sizes.
-
-**`qc.analysis.enabled is true, which needs the optional analysis extras`**
-Run `pip install -e '.[analysis]'`, or set `qc.analysis.enabled: false`.
-
-**Everything validates but almost no reads are assigned.**
-Check the `funnel` figure. If `valid_adt` is high but `valid_all` is low, the cell
-barcode is the problem — confirm the round offsets and that
-`matching.cell_barcode.census` samples a window that actually exists in your file
-(with `offset_reads: 3000000`, a file with fewer than ~4M reads gives an empty
-census, so only exact barcode matches are ever accepted). If `valid_adt` itself is
-low, check the ADT offsets and that the panel file matches the antibodies used.
-
-**`--sublibrary is required when the config lists more than one`**
-Either name one with `--sublibrary`, or use `run-multi` to process them all.
-
-**`N duplicate cell barcodes across sublibraries after prefixing`**
-`cell_barcode.name_template` must include `{sublibrary}`, or barcodes from
-different sublibraries collide during aggregation.
-
----
-
 ## Development
 
 ```bash
@@ -494,8 +482,9 @@ pytest                                   # synthetic FASTQs, no real data needed
 ```
 
 Tests build their own FASTQs in-test against two deliberately different read
-structures, so extraction is exercised under more than one chemistry rather than
-only the one this package was ported from.
+structures, so extraction is exercised under more than one chemistry. Both
+shipped configs are also parsed and structurally validated by the suite, so they
+cannot drift from the code.
 
 To check a run against a reference run:
 

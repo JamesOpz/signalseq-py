@@ -168,29 +168,90 @@ def test_provenance_records_version_and_config(v3like, out_dir):
     assert resolved["read_structure"]["elements"]["rt"]["start"] == 51
 
 
-def test_compatibility_flags_default_to_original_behaviour(v3like, out_dir):
-    """valid_cell_barcode == valid_all is the ported (buggy) behaviour."""
+def test_valid_cell_barcode_exceeds_valid_all(v3like, out_dir):
+    """The counter must report barcode resolution independently of the ADT tag.
+
+    The fixture plants reads with unmatchable ADT tags but valid barcodes, so a
+    correct counter is strictly greater than valid_all. Equality would mean the
+    counter had regressed to mirroring valid_all.
+    """
     cfg_path = v3like.write_config(out_dir)
     _run(["adt", "run", "--config", str(cfg_path), "--sublibrary", "SubA"])
     stats = json.loads((out_dir / "SubA" / "SubA_qc_stats.json").read_text())["processing_stats"]
-    assert stats["valid_cell_barcode"] == stats["valid_all"]
+
+    assert stats["valid_cell_barcode"] > stats["valid_all"]
+    # And it can never exceed the reads that were actually read.
+    assert stats["valid_cell_barcode"] <= stats["total_reads"]
 
 
-def test_fixing_the_counter_changes_only_that_number(v3like, out_dir, tmp_path):
-    """With the fix on, valid_cell_barcode must exceed valid_all (junk ADT reads
-    still have resolvable barcodes)."""
-    plain = v3like.write_config(out_dir)
-    _run(["adt", "run", "--config", str(plain), "--sublibrary", "SubA"])
-    before = json.loads((out_dir / "SubA" / "SubA_qc_stats.json").read_text())
+def test_funnel_counters_are_mutually_consistent(chemistry, out_dir):
+    cfg_path = chemistry.write_config(out_dir)
+    _run(["adt", "run", "--config", str(cfg_path), "--sublibrary", "SubA"])
+    s = json.loads((out_dir / "SubA" / "SubA_qc_stats.json").read_text())["processing_stats"]
 
-    fixed_out = tmp_path / "runs" / "fixed"
-    fixed = v3like.write_config(
-        fixed_out, compatibility={"fix_valid_cell_barcode_counter": True}
+    assert s["valid_all"] <= s["valid_adt"] <= s["total_reads"]
+    assert s["valid_all"] <= s["valid_cell_barcode"] <= s["total_reads"]
+    assert s["bc_exact_triple"] <= s["valid_all"]
+
+
+def test_unparseable_timepoint_uses_the_unassigned_label(v3like, out_dir):
+    """A layout row whose timepoint does not parse must not leak the literal
+    '<NA>' into the condition string."""
+    layout = v3like.root / "layout.csv"
+    wells = [w.split(",")[0] for w in layout.read_text().splitlines()[1:]]
+    layout.write_text(
+        "Well_ID,Sample_name\n" + f"{wells[0]},PDO_unknown_Treatment\n"
+        + "".join(f"{w},PDO_6hr_Treatment\n" for w in wells[1:])
     )
-    _run(["adt", "run", "--config", str(fixed), "--sublibrary", "SubA"])
-    after = json.loads((fixed_out / "SubA" / "SubA_qc_stats.json").read_text())
 
-    assert after["processing_stats"]["valid_cell_barcode"] > after["processing_stats"]["valid_all"]
-    # Everything else is untouched.
-    assert before["processing_stats"]["valid_all"] == after["processing_stats"]["valid_all"]
-    assert before["matrix_stats"] == after["matrix_stats"]
+    _run(["adt", "run", "--config", str(v3like.write_config(out_dir)),
+          "--sublibrary", "SubA"])
+    raw = ad.read_h5ad(out_dir / "SubA" / "SubA_raw.h5ad")
+
+    conditions = set(raw.obs["condition"].astype(str))
+    assert not any("<NA>" in c for c in conditions), conditions
+    assert any("Unassigned" in c for c in conditions), conditions
+
+
+def test_pca_random_state_is_pinned(v3like, out_dir):
+    """Explicitly set, so an upgrade to scanpy's default cannot move results."""
+    from signalseq.config import load_config
+    cfg = load_config(v3like.write_config(out_dir))
+    assert cfg.qc["analysis"]["pca_random_state"] == 0
+
+
+def test_too_few_cells_skips_analysis_instead_of_crashing(v3like, out_dir):
+    """A strict threshold on a small slice must not abort after the costly work.
+
+    Previously this died inside the PCA solver with a message about component
+    counts, losing the whole run.
+    """
+    cfg_path = v3like.write_config(out_dir, filtering={"min_umi_per_cell": 10**9},
+                                   qc={"analysis": {"enabled": True}})
+    assert _run(["adt", "run", "--config", str(cfg_path), "--sublibrary", "SubA"]) == 0
+
+    sub = out_dir / "SubA"
+    # Counts and core QC still land.
+    assert (sub / "SubA_raw.h5ad").is_file()
+    assert (sub / "SubA_filtered.h5ad").is_file()
+    assert (sub / "SubA_qc_stats.json").is_file()
+    filtered = ad.read_h5ad(sub / "SubA_filtered.h5ad")
+    assert filtered.n_obs == 0 or filtered.n_obs < 10
+    # But no embedding was produced.
+    assert "X_pca" not in filtered.obsm
+    assert "X_phate" not in filtered.obsm
+
+
+def test_analysis_component_count_is_capped_by_both_dimensions():
+    """n_comps must respect n_obs as well as n_vars."""
+    import numpy as np
+    import anndata as ad_mod
+    from signalseq.analysis import effective_n_comps
+
+    cfg = {"n_pcs": 10}
+    small_cells = ad_mod.AnnData(X=np.ones((4, 14), dtype="float32"))
+    assert effective_n_comps(small_cells, cfg) == 3      # capped by n_obs - 1
+    small_vars = ad_mod.AnnData(X=np.ones((500, 3), dtype="float32"))
+    assert effective_n_comps(small_vars, cfg) == 2       # capped by n_vars - 1
+    plenty = ad_mod.AnnData(X=np.ones((500, 14), dtype="float32"))
+    assert effective_n_comps(plenty, cfg) == 10          # the configured value

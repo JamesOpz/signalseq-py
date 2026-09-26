@@ -209,10 +209,8 @@ def test_defaults_reproduce_the_original_parameters(v3like, out_dir):
     }
     assert cfg.filtering["knee"]["exclude_top_n"] == 3
     assert cfg.performance["chunk_rows"] == 25_000_000
-    assert cfg.compatibility == {
-        "fix_valid_cell_barcode_counter": False,
-        "fix_missing_timepoint_label": False,
-    }
+    # Pinned explicitly, and equal to scanpy's own default so it is a no-op today.
+    assert cfg.qc["analysis"]["pca_random_state"] == 0
 
 
 def test_shipped_example_config_is_structurally_valid():
@@ -230,10 +228,12 @@ def test_shipped_example_config_is_structurally_valid():
     assert data["read_structure"]["cell_barcode"]["order"] == ["rt", "bc2", "bc3"]
     assert data["filtering"]["min_umi_per_cell"] == 250
     assert data["filtering"]["min_adts_detected"] == 1
-    # Linkers must ship disabled: the original never inspects them.
+    # Linkers ship disabled: an exact check would discard ~24% of real reads.
     assert all(l["enabled"] is False for l in data["read_structure"]["linkers"])
-    # And no defect fixes on by default.
-    assert all(v is False for v in data["compatibility"].values())
+    # The PCA seed is pinned rather than left to the library default.
+    assert data["qc"]["analysis"]["pca_random_state"] == 0
+    # No compatibility shims remain.
+    assert "compatibility" not in data
 
 
 def test_example_config_contains_no_real_paths():
@@ -243,3 +243,72 @@ def test_example_config_contains_no_real_paths():
     assert "/Users/" not in text
     assert "/home/" not in text
     assert "PATH/TO" in text
+
+
+def test_bad_pca_random_state_is_refused(v3like, out_dir):
+    with pytest.raises(ConfigError, match="pca_random_state"):
+        load_config(_write(v3like, out_dir, qc={"analysis": {"pca_random_state": -1}}))
+
+
+def test_config_has_no_compatibility_section(v3like, out_dir):
+    cfg = load_config(_write(v3like, out_dir))
+    assert "compatibility" not in cfg.raw
+
+
+def test_removed_compatibility_section_is_refused_not_ignored(v3like, out_dir):
+    """A stale config asking for the old behaviour must fail loudly.
+
+    Silently ignoring it would be the worst outcome: the run would look like it
+    honoured `reproduce_original` while using the fixed behaviour.
+    """
+    path = _write(v3like, out_dir)
+    data = yaml.safe_load(open(path))
+    data["compatibility"] = {"reproduce_original": True}
+    yaml.safe_dump(data, open(path, "w"))
+
+    with pytest.raises(ConfigError, match="no longer exists"):
+        load_config(path)
+
+
+def test_unknown_top_level_section_is_refused(v3like, out_dir):
+    path = _write(v3like, out_dir)
+    data = yaml.safe_load(open(path))
+    data["filterring"] = {"min_umi_per_cell": 10}      # typo for `filtering`
+    yaml.safe_dump(data, open(path, "w"))
+
+    with pytest.raises(ConfigError, match="Unknown config section"):
+        load_config(path)
+
+
+def test_annotated_template_loads_and_is_self_consistent():
+    """The teaching template must stay valid as the schema evolves."""
+    root = repo_root()
+    cfg = load_config(root / "configs" / "annotated_template.yaml")
+    rs = cfg.read_structure
+    # Its documented layout: two rounds, ADT on R2, UMI last, nothing at base 1.
+    assert [e.name for e in rs.rounds] == ["cb1", "cb2"]
+    assert rs.adt.read == "R2"
+    assert rs.umi.start1 > rs.adt.start1
+    assert rs.min_length("R1") == 24
+    assert rs.min_length("R2") == 28
+    assert rs.overlaps() == []
+    assert "{sublibrary}" in rs.name_template
+    # Linkers documented but not enforced.
+    assert all(not l.enabled for l in rs.linkers)
+
+
+def test_annotated_template_contains_no_real_paths():
+    root = repo_root()
+    text = (root / "configs" / "annotated_template.yaml").read_text()
+    assert "/Users/" not in text
+    assert "/home/" not in text
+    assert "PATH/TO" in text
+
+
+def test_all_example_config_sections_are_recognised():
+    """Guards against the shipped example drifting from KNOWN_SECTIONS."""
+    from signalseq.config import KNOWN_SECTIONS
+    root = repo_root()
+    for name in ("parse_v3.example.yaml", "annotated_template.yaml"):
+        data = yaml.safe_load(open(root / "configs" / name))
+        assert set(data) <= KNOWN_SECTIONS, (name, sorted(set(data) - KNOWN_SECTIONS))

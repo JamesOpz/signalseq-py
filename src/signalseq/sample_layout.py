@@ -76,15 +76,12 @@ def load_rt_layout(spec: LayoutSpec, ann_cfg: Mapping) -> pd.DataFrame:
     df["treatment"] = [p[2] for p in parsed]
 
     template = str(ann_cfg.get("condition_template", "{culture_type}_{timepoint_hrs}hr_{treatment}"))
-    fix_missing = bool(ann_cfg.get("_fix_missing_timepoint_label", False))
     unassigned = str(ann_cfg.get("unassigned_label", "Unassigned"))
 
-    # pandas renders a missing Int64 as the literal "<NA>", which the original
-    # pipeline then embedded in the condition string. Ported as-is; the fix
-    # substitutes the unassigned label instead. See compatibility.py.
-    timepoint_str = df["timepoint_hrs"].astype("Int64").astype(str)
-    if fix_missing:
-        timepoint_str = timepoint_str.replace("<NA>", unassigned)
+    # A missing timepoint gets the unassigned label. Casting a nullable Int64 to
+    # str would otherwise render it as the literal four characters "<NA>" and
+    # embed those in the condition string.
+    timepoint_str = df["timepoint_hrs"].astype("Int64").astype(str).replace("<NA>", unassigned)
 
     df["condition"] = [
         template.format(culture_type=c, timepoint_hrs=t, treatment=tr)

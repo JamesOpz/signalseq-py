@@ -18,7 +18,7 @@ from . import knee, matrix_build, provenance, qc_plots, sample_layout, saturatio
 from .bc_correct import BarcodeCorrector, run_census
 from .config import Config
 from .encoding import Encoder
-from .hot_loop import count_barcode_resolved, scan_sublibrary
+from .hot_loop import scan_sublibrary
 from .umi_dedup import collapse_umis
 from .whitelists import load_all
 
@@ -46,7 +46,6 @@ def process_sublibrary(cfg: Config, name: str, debug_reads: int | None = None) -
                      extra={"sublibrary": name, "debug_reads": debug_reads})
 
     rs = cfg.read_structure
-    compat = cfg.compatibility
 
     log(f"Loading whitelists for {name}")
     panel, whitelists = load_all(cfg)
@@ -72,18 +71,11 @@ def process_sublibrary(cfg: Config, name: str, debug_reads: int | None = None) -
         sub.r1, sub.r2, rs, panel, whitelists, corrector, encoder,
         chunk_rows=int(cfg.performance["chunk_rows"]),
         gzip_binaries=cfg.performance["gzip_binaries"],
-        fix_valid_cell_barcode_counter=bool(compat["fix_valid_cell_barcode_counter"]),
         max_reads=debug_reads,
     )
     dt = time.time() - t0
     log(f"Scanned {stats['total_reads']:,} reads in {dt:.1f}s "
         f"({stats['total_reads']/max(dt,1e-9):,.0f} reads/sec); {len(cell_id):,} valid reads")
-
-    if compat["fix_valid_cell_barcode_counter"]:
-        log("Recounting barcode-resolved reads in a separate pass (compatibility fix active)")
-        stats["valid_cell_barcode"] = count_barcode_resolved(
-            barcode_path, rs, corrector, cfg.performance["gzip_binaries"], max_reads=debug_reads
-        )
 
     log("Collapsing UMIs (vectorized exact + mismatch-tolerant collapse)")
     umi_cfg = cfg.matching["umi"]
@@ -99,7 +91,6 @@ def process_sublibrary(cfg: Config, name: str, debug_reads: int | None = None) -
 
     log(f"Annotating sample identity from {cfg.layout.csv.name}")
     ann_cfg = dict(cfg.sample_annotation)
-    ann_cfg["_fix_missing_timepoint_label"] = bool(compat["fix_missing_timepoint_label"])
     layout_df = sample_layout.load_rt_layout(cfg.layout, ann_cfg)
     join_round = str(ann_cfg.get("join_on_round") or rs.cell_barcode_order[0])
     join_column = f"{rs[join_round].label}_well"
@@ -155,13 +146,24 @@ def process_sublibrary(cfg: Config, name: str, debug_reads: int | None = None) -
         if plots_on:
             plotter.saturation_curve(saturation_df)
 
+    analysis_ran = False
     if cfg.qc["analysis"]["enabled"]:
         from . import analysis
-        log("Running CLR normalization + PCA + PHATE")
-        t0 = time.time()
-        filtered = analysis.run_clr_pca_phate(filtered, cfg.qc["analysis"], cfg.threads)
-        log(f"CLR/PCA/PHATE done in {time.time()-t0:.1f}s")
+        try:
+            # Checked before the expensive work, so a doomed run says why up front
+            # instead of failing later inside a solver.
+            analysis.check_analysis_feasible(filtered, cfg.qc["analysis"])
+        except analysis.InsufficientCellsError as exc:
+            log(f"WARNING: skipping CLR/PCA/PHATE.\n{exc}")
+            log("Counts, core QC and the remaining plots are still written.")
+        else:
+            log("Running CLR normalization + PCA + PHATE")
+            t0 = time.time()
+            filtered = analysis.run_clr_pca_phate(filtered, cfg.qc["analysis"], cfg.threads)
+            log(f"CLR/PCA/PHATE done in {time.time()-t0:.1f}s")
+            analysis_ran = True
 
+    if analysis_ran:
         if plots_on:
             plotter.clr_distributions(filtered)
             plotter.pca_suite(filtered)
