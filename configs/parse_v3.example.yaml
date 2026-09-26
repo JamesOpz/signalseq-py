@@ -1,0 +1,221 @@
+# ===========================================================================
+# SIGNAL-seq ADT pipeline -- Parse Biosciences Evercode WT v3 chemistry.
+#
+# Copy this file, edit the paths under `inputs:` and `run.output_dir`, then:
+#     signalseq adt validate   --config my_config.yaml
+#     signalseq adt run-multi  --config my_config.yaml
+#
+# Every value below reproduces the original parsev3_pipeline exactly.
+# All read coordinates are 1-BASED and INCLUSIVE of `start`.
+# ===========================================================================
+
+schema_version: 1
+
+run:
+  name: parse_v3_run_1
+  # MUST resolve outside the git repo -- validation refuses a path inside it.
+  output_dir: /PATH/TO/signalseq-runs/parse_v3_run_1
+  # -1 = all cores. Only reaches PHATE; the read scan is single-threaded by
+  # design and decompression happens in child processes.
+  threads: -1
+  overwrite: false
+
+inputs:
+  # `run --sublibrary NAME` picks one of these; `run-multi` processes all of
+  # them in listed order and then aggregates.
+  sublibraries:
+    - name: Sublibrary_3
+      r1: /PATH/TO/fastq/ADT_Sublibrary_3_S5_R1_001.fastq.gz
+      r2: /PATH/TO/fastq/ADT_Sublibrary_3_S5_R2_001.fastq.gz
+    - name: Sublibrary_4
+      r1: /PATH/TO/fastq/ADT_Sublibrary_4_S6_R1_001.fastq.gz
+      r2: /PATH/TO/fastq/ADT_Sublibrary_4_S6_R2_001.fastq.gz
+    - name: Sublibrary_6
+      r1: /PATH/TO/fastq/ADT_Sublibrary_6_S7_R1_001.fastq.gz
+      r2: /PATH/TO/fastq/ADT_Sublibrary_6_S7_R2_001.fastq.gz
+    - name: Sublibrary_7
+      r1: /PATH/TO/fastq/ADT_Sublibrary_7_S8_R1_001.fastq.gz
+      r2: /PATH/TO/fastq/ADT_Sublibrary_7_S8_R2_001.fastq.gz
+
+  # One named entry per cell-barcode round, referenced from
+  # `read_structure.elements.*.whitelist`. Parse v3 uses the SAME 96-well
+  # ligation plate for both ligation rounds, so bc2_round and bc3_round point at
+  # the same two files -- each round still declares its own entry, so a
+  # chemistry with distinct plates per round needs no code change. Repeated
+  # files are parsed once and cached.
+  whitelists:
+    rt_round:
+      csv: /PATH/TO/reference/bc_data_rt.csv
+      sequence_column: sequence
+      well_column: well
+      stype_column: stype             # optional; colours the reads-per-RT plot
+      edit_distance_json: /PATH/TO/reference/bc_dict_n99_v5.json
+    bc2_round:
+      csv: /PATH/TO/reference/bc_data_ligation.csv
+      sequence_column: sequence
+      well_column: well
+      stype_column: null
+      edit_distance_json: /PATH/TO/reference/bc_dict_R3_v3.json
+    bc3_round:
+      csv: /PATH/TO/reference/bc_data_ligation.csv
+      sequence_column: sequence
+      well_column: well
+      stype_column: null
+      edit_distance_json: /PATH/TO/reference/bc_dict_R3_v3.json
+
+  adt_panel:
+    csv: /PATH/TO/reference/adt_barcodes.csv
+    barcode_column: Barcode
+    name_column: Antigen              # becomes var_names
+
+  rt_layout:
+    csv: /PATH/TO/reference/Parse_Exp_RT_Layout.csv
+    well_column: Well_ID
+    sample_column: Sample_name
+
+read_structure:
+  coordinates: one_based
+  adt_element: adt
+  umi_element: umi
+
+  # R1 is 64bp and R2 58bp in Parse v3; the structure uses R1[1..15] and all of R2.
+  #
+  #  R1  1........15  ADT tag (15bp)
+  #  R2  1........10  UMI (10bp)
+  #     11........18  bc3, ligation round 3 (8bp)
+  #     19........30  linker (12bp, not inspected)
+  #     31........38  bc2, ligation round 2 (8bp)
+  #     39........50  linker (12bp, not inspected)
+  #     51........58  bc1 / RT (8bp)
+  #
+  # `obs_label` names this element's columns in adata.obs -- RT_well,
+  # RT_sequence and so on -- keeping the original pipeline's column names while
+  # the elements themselves have clearer names.
+  elements:
+    adt: { read: R1, start:  1, length: 15, whitelist: adt_panel, obs_label: ADT }
+    umi: { read: R2, start:  1, length: 10, obs_label: UMI }
+    bc3: { read: R2, start: 11, length:  8, whitelist: bc3_round, obs_label: R3 }
+    bc2: { read: R2, start: 31, length:  8, whitelist: bc2_round, obs_label: R2 }
+    rt:  { read: R2, start: 51, length:  8, whitelist: rt_round,  obs_label: RT }
+
+  # Constant sequences between the barcode blocks. The original pipeline skips
+  # them without inspecting them, so `enabled: false` is what reproduces it --
+  # and it is also the correct choice here: linker_bc2_rt matches exactly in only
+  # ~76% of reads (there is a common 1-mismatch variant, TCCAATCACCTC), so an
+  # exact check would discard roughly a quarter of all reads.
+  # Declared anyway, so a future chemistry can locate barcodes by anchor.
+  linkers:
+    - name: linker_bc3_bc2
+      read: R2
+      start: 19
+      length: 12
+      sequence: ATGAGGGGTCAG
+      max_mismatches: null
+      enabled: false
+    - name: linker_bc2_rt
+      read: R2
+      start: 39
+      length: 12
+      sequence: TCCAACCACCTC
+      max_mismatches: null
+      enabled: false
+
+  cell_barcode:
+    # Rounds combined most-significant first: rt * 96 * 96 + bc2 * 96 + bc3.
+    order: [rt, bc2, bc3]
+    name_template: "{sublibrary}_{rt}_{bc2}_{bc3}"
+
+matching:
+  adt:
+    max_mismatches: 1        # exact + 1bp substitution dictionary
+    drop_ambiguous: true     # a mutant reachable from two tags is discarded
+
+  cell_barcode:
+    max_edit_distance: 2     # levels read from the edit_distance_json files
+    census:                  # first pass, deriving the combo-count threshold
+      offset_reads: 3000000
+      n_reads: 1000000
+      perfect_cell_threshold: 0.92
+      min_count_threshold: 5
+      accept: strictly_greater    # combo count must be > threshold
+
+  umi:
+    method: directional      # UMI-tools directional; `exact` also available
+    max_mismatches: 1
+    directional_count_ratio: 2   # absorb j into seed i when count_j <= 2*count_i - 1
+
+filtering:
+  # Permissive first-pass cut: a fixed floor rather than the automatic knee,
+  # because final filtering is done jointly with the RNA modality. The knee is
+  # still computed and drawn on the QC plots for reference.
+  min_umi_per_cell: 250      # null => use the detected knee
+  max_umi_per_cell: null
+  min_adts_detected: 1
+  knee:
+    exclude_top_n: 3         # ranks skipped when fitting the log-log chord
+
+qc:
+  saturation:
+    enabled: true
+    fractions: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    seed: 0
+  analysis:
+    enabled: true            # false == counts + core QC only (skips muon/phate)
+    n_pcs: 10
+    pca_svd_solver: arpack
+    phate:
+      n_components: 2
+      knn: 15
+      decay: 40
+      t: auto
+      random_state: 42
+  plots:
+    enabled: true
+    dpi: 150
+    style: seaborn-v0_8-whitegrid
+    plate_rows: [A, B, C, D, E, F, G, H]
+    plate_cols: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    grid_columns: 4
+    color_percentiles: [5, 95]
+    well_heatmap_cmaps: [Blues, Greens, Oranges]     # one per round, in order
+    stype_colors: { T: "#1f77b4", R: "#ff7f0e", X: "#2ca02c" }
+    treatment_order: [SN-38, DMSO, Unassigned]
+    culture_colors: { CoCulture: "#4C72B0", MonoCulture: "#DD8452", Unassigned: gray }
+    unassigned_label: Unassigned
+
+# How to turn the RT layout's Sample_name into obs annotation. Cosmetic: it
+# never affects counts. This experiment's names are
+# "{culture}_{timepoint}_Treatment" for treated wells and
+# "{culture}_DMSO_{timepoint}hrs" for vehicle controls.
+sample_annotation:
+  join_on_round: rt          # which barcode round carries the sample identity
+  culture_map:
+    PDO: MonoCulture
+    PDO+CAF: CoCulture
+  treatment:
+    control_token: DMSO      # token marking a vehicle control
+    control_label: DMSO
+    treated_label: SN-38
+  unassigned_label: Unassigned
+  condition_template: "{culture_type}_{timepoint_hrs}hr_{treatment}"
+
+outputs:
+  raw_anndata: true          # <name>_raw.h5ad -- all candidate barcodes
+  filtered_anndata: true     # <name>_filtered.h5ad -- called cells
+  saturation_table: true     # <name>_saturation.csv
+  qc_stats: true             # <name>_qc_stats.json
+  figures: true              # figures/<name>_*.png
+  aggregate:
+    combined_anndata: true   # combined/combined_filtered.h5ad
+    combined_qc_stats: true
+    copy_best_saturation: true
+
+performance:
+  chunk_rows: 25000000       # per-chunk numpy buffer in the read scan
+  gzip_binaries: [libdeflate-gzip, gzip]   # tried in order, then python gzip
+
+# Defects found while porting the original pipeline. false = reproduce the
+# original exactly. See src/signalseq/compatibility.py for what each changes.
+compatibility:
+  fix_valid_cell_barcode_counter: false
+  fix_missing_timepoint_label: false
