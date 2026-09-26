@@ -217,18 +217,3 @@ outputs:
 performance:
   chunk_rows: 25000000       # per-chunk numpy buffer in the read scan
   gzip_binaries: [libdeflate-gzip, gzip]   # tried in order, then python gzip
-
-# Defects found while porting the original pipeline. The fixes are ON by
-# default. To reproduce the original pipeline's numbers exactly -- for an
-# equivalence check, or to match results generated before these fixes -- set
-# reproduce_original: true, which turns every fix off at once.
-# See src/signalseq/compatibility.py for what each flag changes.
-compatibility:
-  reproduce_original: false
-  # Count every read whose barcode rounds resolve, not just those that also had
-  # a matching ADT tag. Changes processing_stats.valid_cell_barcode only.
-  fix_valid_cell_barcode_counter: true
-  # Use the unassigned label for an unparseable timepoint instead of emitting
-  # the literal "<NA>" into the condition string. No effect unless a layout row
-  # has a timepoint that does not parse.
-  fix_missing_timepoint_label: true

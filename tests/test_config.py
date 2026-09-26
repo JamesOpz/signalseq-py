@@ -228,13 +228,12 @@ def test_shipped_example_config_is_structurally_valid():
     assert data["read_structure"]["cell_barcode"]["order"] == ["rt", "bc2", "bc3"]
     assert data["filtering"]["min_umi_per_cell"] == 250
     assert data["filtering"]["min_adts_detected"] == 1
-    # Linkers must ship disabled: the original never inspects them.
+    # Linkers ship disabled: an exact check would discard ~24% of real reads.
     assert all(l["enabled"] is False for l in data["read_structure"]["linkers"])
-    # Defect fixes ship ON, with the escape hatch off.
-    compat = data["compatibility"]
-    assert compat["reproduce_original"] is False
-    assert compat["fix_valid_cell_barcode_counter"] is True
-    assert compat["fix_missing_timepoint_label"] is True
+    # The PCA seed is pinned rather than left to the library default.
+    assert data["qc"]["analysis"]["pca_random_state"] == 0
+    # No compatibility shims remain.
+    assert "compatibility" not in data
 
 
 def test_example_config_contains_no_real_paths():
@@ -246,51 +245,44 @@ def test_example_config_contains_no_real_paths():
     assert "PATH/TO" in text
 
 
-# -- compatibility flags ---------------------------------------------------
-
-def test_defect_fixes_are_on_by_default(v3like, out_dir):
-    cfg = load_config(_write(v3like, out_dir))
-    from signalseq.compatibility import FIXES, active_fixes
-    assert len(active_fixes(cfg.compatibility)) == len(FIXES)
-
-
-def test_reproduce_original_turns_every_fix_off(v3like, out_dir):
-    cfg = load_config(_write(v3like, out_dir,
-                             compatibility={"reproduce_original": True}))
-    from signalseq.compatibility import active_fixes
-    assert active_fixes(cfg.compatibility) == ()
-    assert cfg.compatibility["fix_valid_cell_barcode_counter"] is False
-    assert cfg.compatibility["fix_missing_timepoint_label"] is False
-
-
-def test_reproduce_original_overrides_an_explicit_fix(v3like, out_dir):
-    """The single switch wins, so an equivalence run cannot be half-fixed."""
-    cfg = load_config(_write(v3like, out_dir, compatibility={
-        "reproduce_original": True,
-        "fix_valid_cell_barcode_counter": True,
-    }))
-    assert cfg.compatibility["fix_valid_cell_barcode_counter"] is False
-
-
-def test_individual_fix_can_be_disabled(v3like, out_dir):
-    cfg = load_config(_write(v3like, out_dir, compatibility={
-        "fix_missing_timepoint_label": False,
-    }))
-    assert cfg.compatibility["fix_valid_cell_barcode_counter"] is True
-    assert cfg.compatibility["fix_missing_timepoint_label"] is False
-
-
-def test_unknown_compatibility_flag_is_refused(v3like, out_dir):
-    with pytest.raises(ConfigError, match="unknown flag"):
-        load_config(_write(v3like, out_dir, compatibility={"fix_typo_here": True}))
-
-
-def test_non_boolean_compatibility_flag_is_refused(v3like, out_dir):
-    with pytest.raises(ConfigError, match="true or false"):
-        load_config(_write(v3like, out_dir,
-                           compatibility={"fix_missing_timepoint_label": "yes"}))
-
-
 def test_bad_pca_random_state_is_refused(v3like, out_dir):
     with pytest.raises(ConfigError, match="pca_random_state"):
         load_config(_write(v3like, out_dir, qc={"analysis": {"pca_random_state": -1}}))
+
+
+def test_config_has_no_compatibility_section(v3like, out_dir):
+    cfg = load_config(_write(v3like, out_dir))
+    assert "compatibility" not in cfg.raw
+
+
+def test_removed_compatibility_section_is_refused_not_ignored(v3like, out_dir):
+    """A stale config asking for the old behaviour must fail loudly.
+
+    Silently ignoring it would be the worst outcome: the run would look like it
+    honoured `reproduce_original` while using the fixed behaviour.
+    """
+    path = _write(v3like, out_dir)
+    data = yaml.safe_load(open(path))
+    data["compatibility"] = {"reproduce_original": True}
+    yaml.safe_dump(data, open(path, "w"))
+
+    with pytest.raises(ConfigError, match="no longer exists"):
+        load_config(path)
+
+
+def test_unknown_top_level_section_is_refused(v3like, out_dir):
+    path = _write(v3like, out_dir)
+    data = yaml.safe_load(open(path))
+    data["filterring"] = {"min_umi_per_cell": 10}      # typo for `filtering`
+    yaml.safe_dump(data, open(path, "w"))
+
+    with pytest.raises(ConfigError, match="Unknown config section"):
+        load_config(path)
+
+
+def test_all_example_config_sections_are_recognised():
+    """Guards against the shipped example drifting from KNOWN_SECTIONS."""
+    from signalseq.config import KNOWN_SECTIONS
+    root = repo_root()
+    data = yaml.safe_load(open(root / "configs" / "parse_v3.example.yaml"))
+    assert set(data) <= KNOWN_SECTIONS, sorted(set(data) - KNOWN_SECTIONS)

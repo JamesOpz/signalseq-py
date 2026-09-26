@@ -45,16 +45,17 @@ def guarded_reads(read_structure: ReadStructure) -> tuple[str, ...]:
 def new_stats(read_structure: ReadStructure) -> dict:
     """The funnel counters, in the order they are populated.
 
-    Key names are the original pipeline's, kept verbatim so `*_qc_stats.json`
-    stays comparable across the port:
+    Key names are inherited from the pipeline this was ported from, so
+    `*_qc_stats.json` stays comparable with older runs:
 
       <read>_too_short  that read was shorter than the layout needs. For Parse
                         v3 this is the single key `r2_too_short`, since the UMI
                         and all three rounds sit on R2.
       valid_adt         the ADT tag matched the panel
-      valid_cell_barcode / valid_all
-                        see the note in scan_sublibrary -- in the ported
-                        behaviour these are necessarily equal
+      valid_cell_barcode
+                        every barcode round resolved, whether or not the ADT tag
+                        matched -- so this is >= valid_all
+      valid_all         ADT tag AND cell barcode both resolved
       bc_exact_triple   every barcode round matched at edit distance 0.
                         "triple" is historical: it counts all rounds, however
                         many the chemistry declares.
@@ -87,7 +88,6 @@ def scan_sublibrary(r1_path, r2_path,
                     encoder: Encoder,
                     chunk_rows: int,
                     gzip_binaries: Sequence[str],
-                    fix_valid_cell_barcode_counter: bool = False,
                     max_reads: int | None = None):
     """Stream one sublibrary's FASTQ pair.
 
@@ -155,43 +155,23 @@ def scan_sublibrary(r1_path, r2_path,
                 stats["linker_mismatch"] += 1
                 continue
 
-        # The two orderings below differ ONLY in when barcode correction runs
-        # relative to the ADT-tag gate, and therefore in what
-        # `valid_cell_barcode` can observe.
-        #
-        # Original: the ADT gate comes first, so correction never sees a read
-        # whose tag failed, and valid_cell_barcode is incremented at the same
-        # point as valid_all -- making the two necessarily equal and the former
-        # meaningless.
-        #
-        # Fixed: correction runs first, so valid_cell_barcode counts every read
-        # whose barcode rounds resolve, independent of its ADT tag, which is
-        # what the name says. Correction is the expensive step, but the ADT gate
-        # only rejects a few percent of reads, so running it on all of them
-        # rather than on the survivors costs a few percent -- far less than the
-        # second FASTQ pass this used to take.
-        if fix_valid_cell_barcode_counter:
-            combo, is_exact = correct(barcode_seq)
-            if combo is not None:
-                stats["valid_cell_barcode"] += 1
-
-            adt_idx = adt_lookup(adt_seq[adt_start:adt_end])
-            if adt_idx is None:
-                continue
-            stats["valid_adt"] += 1
-
-            if combo is None:
-                continue
-        else:
-            adt_idx = adt_lookup(adt_seq[adt_start:adt_end])
-            if adt_idx is None:
-                continue
-            stats["valid_adt"] += 1
-
-            combo, is_exact = correct(barcode_seq)
-            if combo is None:
-                continue
+        # Barcode correction runs BEFORE the ADT-tag gate, so
+        # `valid_cell_barcode` counts every read whose barcode rounds resolve,
+        # independent of whether its ADT tag matched. Correction is the expensive
+        # step, but the ADT gate rejects only a few percent of reads, so running
+        # it on all of them rather than on the survivors costs ~3% of scan time
+        # and needs no second pass over the FASTQ.
+        combo, is_exact = correct(barcode_seq)
+        if combo is not None:
             stats["valid_cell_barcode"] += 1
+
+        adt_idx = adt_lookup(adt_seq[adt_start:adt_end])
+        if adt_idx is None:
+            continue
+        stats["valid_adt"] += 1
+
+        if combo is None:
+            continue
 
         if is_exact:
             stats["bc_exact_triple"] += 1

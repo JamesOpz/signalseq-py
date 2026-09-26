@@ -46,7 +46,6 @@ def process_sublibrary(cfg: Config, name: str, debug_reads: int | None = None) -
                      extra={"sublibrary": name, "debug_reads": debug_reads})
 
     rs = cfg.read_structure
-    compat = cfg.compatibility
 
     log(f"Loading whitelists for {name}")
     panel, whitelists = load_all(cfg)
@@ -72,7 +71,6 @@ def process_sublibrary(cfg: Config, name: str, debug_reads: int | None = None) -
         sub.r1, sub.r2, rs, panel, whitelists, corrector, encoder,
         chunk_rows=int(cfg.performance["chunk_rows"]),
         gzip_binaries=cfg.performance["gzip_binaries"],
-        fix_valid_cell_barcode_counter=bool(compat["fix_valid_cell_barcode_counter"]),
         max_reads=debug_reads,
     )
     dt = time.time() - t0
@@ -93,7 +91,6 @@ def process_sublibrary(cfg: Config, name: str, debug_reads: int | None = None) -
 
     log(f"Annotating sample identity from {cfg.layout.csv.name}")
     ann_cfg = dict(cfg.sample_annotation)
-    ann_cfg["_fix_missing_timepoint_label"] = bool(compat["fix_missing_timepoint_label"])
     layout_df = sample_layout.load_rt_layout(cfg.layout, ann_cfg)
     join_round = str(ann_cfg.get("join_on_round") or rs.cell_barcode_order[0])
     join_column = f"{rs[join_round].label}_well"

@@ -100,16 +100,25 @@ DEFAULTS: dict[str, Any] = {
         },
     },
     "performance": {"chunk_rows": 25_000_000, "gzip_binaries": ["libdeflate-gzip", "gzip"]},
-    # Defects found while porting the original pipeline. The fixes are ON by
-    # default, because shipping known-wrong numbers as the default is worse than
-    # a documented difference from the original. Set `reproduce_original: true`
-    # to turn every fix off at once for an equivalence run, or flip an individual
-    # flag. See compatibility.py for what each one changes.
-    "compatibility": {
-        "reproduce_original": False,
-        "fix_valid_cell_barcode_counter": True,
-        "fix_missing_timepoint_label": True,
-    },
+}
+
+KNOWN_SECTIONS = frozenset({
+    "schema_version", "run", "inputs", "read_structure", "matching",
+    "filtering", "qc", "sample_annotation", "outputs", "performance",
+})
+
+# Sections that existed in an earlier release and were deliberately removed.
+# Silently ignoring one would be dangerous: a config still setting
+# `compatibility.reproduce_original` would appear to request the old behaviour
+# and quietly get the new behaviour instead.
+REMOVED_SECTIONS = {
+    "compatibility": (
+        "The compatibility shims were removed once the two ported defects were "
+        "fixed unconditionally. `valid_cell_barcode` now counts every read whose "
+        "barcode resolves, and an unparseable timepoint uses "
+        "sample_annotation.unassigned_label instead of '<NA>'. Delete this "
+        "section. To reproduce a pre-fix result, use an earlier release."
+    ),
 }
 
 _VALID_UMI_METHODS = ("directional", "exact")
@@ -217,10 +226,6 @@ class Config:
     def sample_annotation(self) -> dict:
         return self.raw["sample_annotation"]
 
-    @property
-    def compatibility(self) -> dict:
-        return self.raw["compatibility"]
-
     def sublibrary(self, name: str) -> Sublibrary:
         for s in self.sublibraries:
             if s.name == name:
@@ -300,6 +305,8 @@ def load_config(path: str | Path) -> Config:
             f"schema_version: this build understands version {SCHEMA_VERSION}, "
             f"config declares {declared!r}"
         )
+
+    _check_sections(user)
 
     raw = _deep_merge(DEFAULTS, user)
     base = path.parent
@@ -399,7 +406,6 @@ def load_config(path: str | Path) -> Config:
             f"should reference 'adt_panel'"
         )
 
-    _resolve_compatibility(raw["compatibility"])
     _validate_matching(raw["matching"])
     _validate_filtering(raw["filtering"])
     _validate_qc(raw["qc"])
@@ -423,25 +429,22 @@ def load_config(path: str | Path) -> Config:
     return cfg
 
 
-def _resolve_compatibility(compat: dict) -> None:
-    """Apply `reproduce_original`, which forces every defect fix off.
+def _check_sections(user: Mapping) -> None:
+    """Reject unknown or removed top-level sections.
 
-    Done here, once, so nothing downstream has to know the precedence rule.
+    A mistyped or obsolete section that is merely ignored is worse than one that
+    errors: the run appears to honour it.
     """
-    from .compatibility import FIXES
-
-    known = {f.flag for f in FIXES} | {"reproduce_original"}
-    unknown = sorted(set(compat) - known)
+    for key in user:
+        if key in REMOVED_SECTIONS:
+            raise ConfigError(f"{key}: this section no longer exists. {REMOVED_SECTIONS[key]}")
+    unknown = sorted(set(user) - KNOWN_SECTIONS)
     if unknown:
         raise ConfigError(
-            f"compatibility: unknown flag(s) {unknown}. Known flags: {sorted(known)}"
+            f"Unknown config section(s) {unknown}. Valid sections are "
+            f"{sorted(KNOWN_SECTIONS)}. Check for a typo -- an unrecognised "
+            f"section would otherwise be silently ignored."
         )
-    for key, value in compat.items():
-        if not isinstance(value, bool):
-            raise ConfigError(f"compatibility.{key}: expected true or false, got {value!r}")
-    if compat.get("reproduce_original"):
-        for f in FIXES:
-            compat[f.flag] = False
 
 
 def _validate_matching(m: Mapping) -> None:

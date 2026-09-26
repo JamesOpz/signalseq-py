@@ -168,44 +168,35 @@ def test_provenance_records_version_and_config(v3like, out_dir):
     assert resolved["read_structure"]["elements"]["rt"]["start"] == 51
 
 
-def test_reproduce_original_gives_the_ported_counter_behaviour(v3like, out_dir):
-    """With reproduce_original, valid_cell_barcode == valid_all, as in the original."""
-    cfg_path = v3like.write_config(out_dir, compatibility={"reproduce_original": True})
+def test_valid_cell_barcode_exceeds_valid_all(v3like, out_dir):
+    """The counter must report barcode resolution independently of the ADT tag.
+
+    The fixture plants reads with unmatchable ADT tags but valid barcodes, so a
+    correct counter is strictly greater than valid_all. Equality would mean the
+    counter had regressed to mirroring valid_all.
+    """
+    cfg_path = v3like.write_config(out_dir)
     _run(["adt", "run", "--config", str(cfg_path), "--sublibrary", "SubA"])
     stats = json.loads((out_dir / "SubA" / "SubA_qc_stats.json").read_text())["processing_stats"]
-    assert stats["valid_cell_barcode"] == stats["valid_all"]
+
+    assert stats["valid_cell_barcode"] > stats["valid_all"]
+    # And it can never exceed the reads that were actually read.
+    assert stats["valid_cell_barcode"] <= stats["total_reads"]
 
 
-def test_fixed_counter_exceeds_valid_all_and_changes_nothing_else(v3like, out_dir, tmp_path):
-    """By default valid_cell_barcode must exceed valid_all: reads whose ADT tag
-    failed still have resolvable barcodes. No other number may move."""
-    original_out = tmp_path / "runs" / "as_original"
-    original = v3like.write_config(original_out, compatibility={"reproduce_original": True})
-    _run(["adt", "run", "--config", str(original), "--sublibrary", "SubA"])
-    before = json.loads((original_out / "SubA" / "SubA_qc_stats.json").read_text())
+def test_funnel_counters_are_mutually_consistent(chemistry, out_dir):
+    cfg_path = chemistry.write_config(out_dir)
+    _run(["adt", "run", "--config", str(cfg_path), "--sublibrary", "SubA"])
+    s = json.loads((out_dir / "SubA" / "SubA_qc_stats.json").read_text())["processing_stats"]
 
-    fixed = v3like.write_config(out_dir)          # fixes on by default
-    _run(["adt", "run", "--config", str(fixed), "--sublibrary", "SubA"])
-    after = json.loads((out_dir / "SubA" / "SubA_qc_stats.json").read_text())
-
-    assert after["processing_stats"]["valid_cell_barcode"] > after["processing_stats"]["valid_all"]
-
-    # Every other funnel counter, and the whole matrix, is untouched.
-    for key in ("total_reads", "valid_adt", "valid_all", "bc_exact_triple"):
-        assert before["processing_stats"][key] == after["processing_stats"][key], key
-    assert before["matrix_stats"] == after["matrix_stats"]
-    assert before["knee"] == after["knee"]
-
-    a = ad.read_h5ad(original_out / "SubA" / "SubA_raw.h5ad")
-    b = ad.read_h5ad(out_dir / "SubA" / "SubA_raw.h5ad")
-    assert list(a.obs_names) == list(b.obs_names)
-    assert (a.X.toarray() == b.X.toarray()).all()
+    assert s["valid_all"] <= s["valid_adt"] <= s["total_reads"]
+    assert s["valid_all"] <= s["valid_cell_barcode"] <= s["total_reads"]
+    assert s["bc_exact_triple"] <= s["valid_all"]
 
 
-def test_missing_timepoint_label_fix(v3like, out_dir, tmp_path):
-    """A layout row whose timepoint does not parse must not leak '<NA>' into
-    the condition string when the fix is active."""
-    # Replace the layout with one row carrying an unparseable timepoint.
+def test_unparseable_timepoint_uses_the_unassigned_label(v3like, out_dir):
+    """A layout row whose timepoint does not parse must not leak the literal
+    '<NA>' into the condition string."""
     layout = v3like.root / "layout.csv"
     wells = [w.split(",")[0] for w in layout.read_text().splitlines()[1:]]
     layout.write_text(
@@ -213,26 +204,17 @@ def test_missing_timepoint_label_fix(v3like, out_dir, tmp_path):
         + "".join(f"{w},PDO_6hr_Treatment\n" for w in wells[1:])
     )
 
-    as_original = tmp_path / "runs" / "as_original"
-    _run(["adt", "run", "--config",
-          str(v3like.write_config(as_original, compatibility={"reproduce_original": True})),
-          "--sublibrary", "SubA"])
-    before = ad.read_h5ad(as_original / "SubA" / "SubA_raw.h5ad")
-
     _run(["adt", "run", "--config", str(v3like.write_config(out_dir)),
           "--sublibrary", "SubA"])
-    after = ad.read_h5ad(out_dir / "SubA" / "SubA_raw.h5ad")
+    raw = ad.read_h5ad(out_dir / "SubA" / "SubA_raw.h5ad")
 
-    before_conditions = set(before.obs["condition"].astype(str))
-    after_conditions = set(after.obs["condition"].astype(str))
-    assert any("<NA>" in c for c in before_conditions), before_conditions
-    assert not any("<NA>" in c for c in after_conditions), after_conditions
-    # Counts are unaffected either way -- this is a labelling fix only.
-    assert (before.X.toarray() == after.X.toarray()).all()
+    conditions = set(raw.obs["condition"].astype(str))
+    assert not any("<NA>" in c for c in conditions), conditions
+    assert any("Unassigned" in c for c in conditions), conditions
 
 
-def test_pca_random_state_is_passed_through(v3like, out_dir):
-    """Explicitly pinned, so an upgrade to scanpy's default cannot move results."""
+def test_pca_random_state_is_pinned(v3like, out_dir):
+    """Explicitly set, so an upgrade to scanpy's default cannot move results."""
     from signalseq.config import load_config
     cfg = load_config(v3like.write_config(out_dir))
     assert cfg.qc["analysis"]["pca_random_state"] == 0

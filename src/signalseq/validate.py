@@ -191,9 +191,7 @@ def _check_encoding(cfg: Config, report: Report, whitelists) -> None:
 
 
 def _describe(cfg: Config, report: Report) -> None:
-    from .compatibility import describe as describe_compat
     report.note("read structure:\n" + _indent(cfg.read_structure.diagram()))
-    report.note(describe_compat(cfg.compatibility))
     census = cfg.matching["cell_barcode"]["census"]
     report.note(
         f"census: {census['n_reads']:,} reads from offset {census['offset_reads']:,}; "

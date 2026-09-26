@@ -379,7 +379,7 @@ Sample names are parsed as three underscore-separated tokens:
 `{culture}_{control_token}_{timepoint}` for controls. Anything else gets
 treatment `Unknown` and a missing timepoint, rather than failing the run.
 
-### `outputs`, `performance`, `compatibility`
+### `outputs`, `performance`
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
@@ -393,9 +393,6 @@ treatment `Unknown` and a missing timepoint, rather than failing the run.
 | `outputs.aggregate.copy_best_saturation` | bool | `true` | Copy the best sublibrary's saturation curve into `combined/`. |
 | `performance.chunk_rows` | int | `25000000` | Rows per preallocated numpy buffer in the read scan. |
 | `performance.gzip_binaries` | list | `[libdeflate-gzip, gzip]` | Decompressors to try, in order. |
-| `compatibility.reproduce_original` | bool | `false` | Turns **every** defect fix off at once, reproducing the original pipeline's numbers. Overrides the individual flags. |
-| `compatibility.fix_valid_cell_barcode_counter` | bool | `true` | Count every read whose barcode rounds resolve, rather than only those that also matched an ADT tag. |
-| `compatibility.fix_missing_timepoint_label` | bool | `true` | Use the unassigned label for an unparseable timepoint instead of the literal `<NA>`. |
 
 ---
 
@@ -502,10 +499,11 @@ bit-identical to it on a full sublibrary (224M read pairs): the raw and filtered
 count matrices, the CLR matrix, the complete read funnel, the knee, and the
 saturation curve all matched exactly.
 
-Two defects were found during that port. Both are **fixed by default**, because
-once equivalence has been demonstrated, shipping known-wrong numbers is worse
-than a documented difference. Set `compatibility.reproduce_original: true` to
-turn both off and reproduce the original exactly.
+Two defects were found during that port, and **both are now fixed
+unconditionally** — there is no flag to restore the old behaviour. Equivalence
+with the original was demonstrated first, at full scale, so the fixes are known
+to change only what they claim to. If you need to reproduce a pre-fix result,
+check out commit `d225860` or earlier, which still carried the opt-out.
 
 1. **`valid_cell_barcode` double-counted `valid_all`.** The original applied the
    ADT-tag gate before barcode correction, so correction never saw a read whose
@@ -514,13 +512,18 @@ turn both off and reproduce the original exactly.
    its name says. **Affects `processing_stats.valid_cell_barcode` only**; no
    matrix, cell call or other counter moves.
 
-   Measured on a 224,465,769-read sublibrary: `valid_cell_barcode` rises from
-   157,029,873 to 163,753,195 (**+6,723,322, +4.28%**) — the reads whose cell
-   barcode resolves but whose ADT tag did not match. Every other funnel counter,
-   the knee, the cells called, the per-condition counts and both count matrices
-   are bit-identical. Because correction now runs on all reads rather than the
-   ~96% passing the ADT gate, the scan costs about **3% more time** (802s vs
-   778s) and no extra pass over the FASTQ.
+   Measured on a 224,465,769-read sublibrary: `valid_cell_barcode` reports
+   163,753,195 where the original reported 157,029,873 (**+6,723,322, +4.28%**) —
+   the reads whose cell barcode resolves but whose ADT tag did not match. Every
+   other funnel counter, the knee, the cells called, the per-condition counts and
+   both count matrices are unchanged. Because correction now runs on all reads
+   rather than the ~96% passing the ADT gate, the scan costs about **3% more
+   time** (802s vs 778s) and no extra pass over the FASTQ.
+
+   **Consequence to be aware of:** `valid_cell_barcode` is no longer equal to
+   `valid_all`, and `overall_valid_rate` is still computed from `valid_all`, so
+   that rate is unchanged. Any downstream script that assumed the two counters
+   were interchangeable needs checking.
 
 2. **An unparseable timepoint rendered as the literal `<NA>`.** The original built
    `condition` by concatenating a pandas `Int64` cast to `str`, so a missing
@@ -529,6 +532,11 @@ turn both off and reproduce the original exactly.
    grouped by it**; counts are untouched. This is latent for a layout whose rows
    all parse cleanly — on the sublibrary above it changed nothing, since every
    layout row parsed. It is insurance, not a correction to existing results.
+
+A third change is not a defect fix but guards against a real failure seen during
+the port: `qc.analysis.pca_random_state` is now passed explicitly instead of
+relying on scanpy's default. It defaults to `0`, which is scanpy's current
+default, so it changes nothing today.
 
 The package also writes a reads-per-barcode array for **every** declared barcode
 round (`uns['reads_per_<round>']`), where the original kept only the first, and
