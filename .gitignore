@@ -1,0 +1,98 @@
+# ---------------------------------------------------------------------------
+# Sequencing data -- never commit reads.
+# ---------------------------------------------------------------------------
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.bam
+*.sam
+*.cram
+
+# ---------------------------------------------------------------------------
+# Single-cell matrices / analysis objects.
+# ---------------------------------------------------------------------------
+*.h5ad
+*.h5mu
+*.h5
+*.hdf5
+*.loom
+*.mtx
+*.mtx.gz
+barcodes.tsv*
+features.tsv*
+matrix.mtx*
+
+# ---------------------------------------------------------------------------
+# Reference / whitelist files. These are Parse Biosciences barcode sets, the
+# ADT panel table and the experiment RT plate layout: licensed or
+# experiment-specific inputs that live outside the repo and are named in the
+# YAML config instead.
+# ---------------------------------------------------------------------------
+reference/
+bc_data_rt.csv
+bc_data_ligation.csv
+bc_dict_*.json
+adt_barcodes.csv
+*_RT_Layout.csv
+
+# ---------------------------------------------------------------------------
+# Outputs, intermediates, logs. All real runs write outside the repo; these
+# patterns are a backstop in case something is ever pointed at the tree.
+# ---------------------------------------------------------------------------
+outs/
+out/
+outputs/
+results/
+runs/
+signalseq-runs/
+logs/
+*.log
+figures/
+*.png
+*.pdf
+*.svg
+*_qc_stats.json
+*_saturation.csv
+resolved_config.yaml
+provenance.json
+
+# ---------------------------------------------------------------------------
+# Credentials.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+*.pem
+*.key
+*_token
+*token.txt
+.netrc
+
+# ---------------------------------------------------------------------------
+# Python.
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.nbc
+*.nbi
+.numba_cache/
+*.egg-info/
+build/
+dist/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ---------------------------------------------------------------------------
+# Notebooks + editor/OS cruft.
+# ---------------------------------------------------------------------------
+.ipynb_checkpoints/
+.DS_Store
+.idea/
+.vscode/
