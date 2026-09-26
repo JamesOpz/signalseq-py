@@ -18,7 +18,7 @@ from . import knee, matrix_build, provenance, qc_plots, sample_layout, saturatio
 from .bc_correct import BarcodeCorrector, run_census
 from .config import Config
 from .encoding import Encoder
-from .hot_loop import count_barcode_resolved, scan_sublibrary
+from .hot_loop import scan_sublibrary
 from .umi_dedup import collapse_umis
 from .whitelists import load_all
 
@@ -78,12 +78,6 @@ def process_sublibrary(cfg: Config, name: str, debug_reads: int | None = None) -
     dt = time.time() - t0
     log(f"Scanned {stats['total_reads']:,} reads in {dt:.1f}s "
         f"({stats['total_reads']/max(dt,1e-9):,.0f} reads/sec); {len(cell_id):,} valid reads")
-
-    if compat["fix_valid_cell_barcode_counter"]:
-        log("Recounting barcode-resolved reads in a separate pass (compatibility fix active)")
-        stats["valid_cell_barcode"] = count_barcode_resolved(
-            barcode_path, rs, corrector, cfg.performance["gzip_binaries"], max_reads=debug_reads
-        )
 
     log("Collapsing UMIs (vectorized exact + mismatch-tolerant collapse)")
     umi_cfg = cfg.matching["umi"]

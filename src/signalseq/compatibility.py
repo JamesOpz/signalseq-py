@@ -1,12 +1,16 @@
-"""Known defects carried over from the original pipeline, and their opt-in fixes.
+"""Known defects carried over from the original pipeline, and their fixes.
 
-The port reproduces the original parsev3_pipeline bug-for-bug by default, so its
-output can be proven identical. Each defect found during the port gets a flag
-under `compatibility:` in the config, defaulting to the original (buggy)
-behaviour. Turning a flag on changes the numbers -- deliberately -- which is why
-they are explicit rather than silently corrected.
+Each defect found while porting has a flag under `compatibility:`. The fixes are
+**on by default**: once equivalence with the original has been established, and
+it has, shipping known-wrong numbers as the default is worse than a documented
+difference from the original.
 
-Flip them only after an equivalence run has established a baseline.
+To reproduce the original exactly -- for an equivalence run, or to match results
+produced before the fixes landed -- set `compatibility.reproduce_original: true`,
+which turns every fix off at once. Individual flags can also be set directly.
+
+Each entry below records what the original did, what the fix does, and which
+outputs move, so a changed number can always be traced to a decision.
 """
 
 from __future__ import annotations
@@ -34,9 +38,11 @@ FIXES: tuple[Fix, ...] = (
             "reads had a resolvable cell barcode."
         ),
         fixed_behaviour=(
-            "valid_cell_barcode is computed in a separate pass over the barcode read and "
-            "counts every read whose barcode rounds resolve, independent of the ADT tag. "
-            "This costs one extra pass over the FASTQ."
+            "barcode correction runs before the ADT-tag gate, so valid_cell_barcode counts "
+            "every read whose barcode rounds resolve, independent of the ADT tag. Correction "
+            "is the expensive step, but the ADT gate rejects only a few percent of reads, so "
+            "running it on all reads rather than on the survivors costs a few percent of "
+            "scan time and needs no extra pass over the FASTQ."
         ),
         affects="processing_stats.valid_cell_barcode in *_qc_stats.json and adata.uns",
     ),
@@ -64,10 +70,15 @@ def active_fixes(compatibility_cfg: dict) -> tuple[Fix, ...]:
 def describe(compatibility_cfg: dict) -> str:
     active = active_fixes(compatibility_cfg)
     if not active:
-        return ("compatibility: reproducing the original pipeline exactly "
-                f"(all {len(FIXES)} known defects preserved)")
-    lines = [f"compatibility: {len(active)} of {len(FIXES)} known defects FIXED "
-             f"-- output will differ from the original:"]
+        return ("compatibility: reproduce_original -- all "
+                f"{len(FIXES)} known defects preserved, output matches the original pipeline")
+    if len(active) == len(FIXES):
+        head = (f"compatibility: all {len(FIXES)} known defects fixed "
+                f"-- these outputs differ from the original pipeline:")
+    else:
+        head = (f"compatibility: {len(active)} of {len(FIXES)} known defects fixed "
+                f"-- these outputs differ from the original pipeline:")
+    lines = [head]
     for f in active:
         lines.append(f"  - {f.flag}: {f.summary}")
         lines.append(f"      affects {f.affects}")

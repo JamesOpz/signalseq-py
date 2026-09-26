@@ -60,6 +60,7 @@ DEFAULTS: dict[str, Any] = {
             "enabled": True,
             "n_pcs": 10,
             "pca_svd_solver": "arpack",
+            "pca_random_state": 0,
             "phate": {"n_components": 2, "knn": 15, "decay": 40, "t": "auto", "random_state": 42},
         },
         "plots": {
@@ -99,11 +100,15 @@ DEFAULTS: dict[str, Any] = {
         },
     },
     "performance": {"chunk_rows": 25_000_000, "gzip_binaries": ["libdeflate-gzip", "gzip"]},
-    # Set true only by the post-verification bugfix pass; see compatibility.py
-    # for exactly what each flag changes.
+    # Defects found while porting the original pipeline. The fixes are ON by
+    # default, because shipping known-wrong numbers as the default is worse than
+    # a documented difference from the original. Set `reproduce_original: true`
+    # to turn every fix off at once for an equivalence run, or flip an individual
+    # flag. See compatibility.py for what each one changes.
     "compatibility": {
-        "fix_valid_cell_barcode_counter": False,
-        "fix_missing_timepoint_label": False,
+        "reproduce_original": False,
+        "fix_valid_cell_barcode_counter": True,
+        "fix_missing_timepoint_label": True,
     },
 }
 
@@ -394,6 +399,7 @@ def load_config(path: str | Path) -> Config:
             f"should reference 'adt_panel'"
         )
 
+    _resolve_compatibility(raw["compatibility"])
     _validate_matching(raw["matching"])
     _validate_filtering(raw["filtering"])
     _validate_qc(raw["qc"])
@@ -415,6 +421,27 @@ def load_config(path: str | Path) -> Config:
     )
     _validate_output_dir(cfg)
     return cfg
+
+
+def _resolve_compatibility(compat: dict) -> None:
+    """Apply `reproduce_original`, which forces every defect fix off.
+
+    Done here, once, so nothing downstream has to know the precedence rule.
+    """
+    from .compatibility import FIXES
+
+    known = {f.flag for f in FIXES} | {"reproduce_original"}
+    unknown = sorted(set(compat) - known)
+    if unknown:
+        raise ConfigError(
+            f"compatibility: unknown flag(s) {unknown}. Known flags: {sorted(known)}"
+        )
+    for key, value in compat.items():
+        if not isinstance(value, bool):
+            raise ConfigError(f"compatibility.{key}: expected true or false, got {value!r}")
+    if compat.get("reproduce_original"):
+        for f in FIXES:
+            compat[f.flag] = False
 
 
 def _validate_matching(m: Mapping) -> None:
@@ -509,6 +536,11 @@ def _validate_qc(q: Mapping) -> None:
     n_pcs = an.get("n_pcs")
     if not isinstance(n_pcs, int) or isinstance(n_pcs, bool) or n_pcs < 1:
         raise ConfigError(f"qc.analysis.n_pcs: expected an integer >= 1, got {n_pcs!r}")
+    seed = an.get("pca_random_state")
+    if not isinstance(seed, int) or isinstance(seed, bool) or seed < 0:
+        raise ConfigError(
+            f"qc.analysis.pca_random_state: expected an integer >= 0, got {seed!r}"
+        )
 
     pl = q.get("plots") or {}
     pct = pl.get("color_percentiles") or []

@@ -43,7 +43,13 @@ def run_clr_pca_phate(adata, analysis_cfg: dict, threads: int = -1):
     adata.layers["clr"] = adata.X.copy()
 
     n_comps = min(adata.n_vars - 1, int(analysis_cfg["n_pcs"]))
-    sc.tl.pca(adata, n_comps=n_comps, svd_solver=str(analysis_cfg["pca_svd_solver"]))
+    # random_state is passed explicitly rather than left to scanpy's default.
+    # The ARPACK solver's result depends on its starting vector, so an implicit
+    # default makes the embedding hostage to the installed scanpy/scipy version:
+    # runs of identical code months apart were seen to diverge by 3e-5 in
+    # X_pca, which amplified to ~0.01 in the PHATE embedding.
+    sc.tl.pca(adata, n_comps=n_comps, svd_solver=str(analysis_cfg["pca_svd_solver"]),
+              random_state=int(analysis_cfg["pca_random_state"]))
 
     phate_kwargs = dict(analysis_cfg.get("phate") or {})
     phate_kwargs["n_jobs"] = threads

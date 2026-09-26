@@ -31,12 +31,18 @@ offsets and lengths.
 ### A note on numerical reproducibility
 
 Counts are **bit-exact** regardless of environment: barcode matching and UMI
-collapse are integer operations in this package. The downstream CLR / PCA /
-PHATE numbers are only bit-reproducible within a **fixed dependency set** —
-patch-level changes in `numpy` or `muon` move CLR values by ~5e-7, which
-amplifies through PCA into the PHATE embedding. If you need to compare embeddings
-across machines or over time, pin your environment. `provenance.json` records the
-versions actually used for every run.
+collapse are integer operations in this package.
+
+The downstream CLR / PCA / PHATE numbers are only bit-reproducible within a
+**fixed dependency set**. This is not hypothetical — running the *same*
+pipeline code three months apart, with identical inputs and bit-identical
+counts and CLR values, produced `X_pca` differing by 3e-5 and a PHATE embedding
+differing by ~0.01, purely from library upgrades in between. The PCA seed is now
+pinned (`qc.analysis.pca_random_state`), which removes one source of this, but
+`scipy`'s ARPACK implementation and `muon`'s CLR can still change between
+versions. If you need to compare embeddings across machines or over time, pin
+your environment. `provenance.json` records the versions actually used for every
+run.
 
 ---
 
@@ -339,6 +345,7 @@ barcode-rank curve.
 | `analysis.enabled` | bool | `true` | Run CLR + PCA + PHATE. False skips it and drops the `muon`/`phate` requirement. |
 | `analysis.n_pcs` | int | `10` | Principal components; capped at `n_vars - 1`. |
 | `analysis.pca_svd_solver` | str | `arpack` | Passed to scanpy. |
+| `analysis.pca_random_state` | int | `0` | Seed for the PCA solver, pinned explicitly. ARPACK's result depends on its starting vector, so leaving this to the library default lets a `scanpy`/`scipy` upgrade shift the PCA and, through it, PHATE. `0` matches scanpy's current default, so setting it changes nothing today. |
 | `analysis.phate.*` | map | `knn 15, decay 40, t auto, random_state 42` | Passed to PHATE, plus `n_jobs` from `run.threads`. |
 | `plots.enabled` | bool | `true` | Write figures. |
 | `plots.dpi` | int | `150` | Figure resolution. |
@@ -386,7 +393,9 @@ treatment `Unknown` and a missing timepoint, rather than failing the run.
 | `outputs.aggregate.copy_best_saturation` | bool | `true` | Copy the best sublibrary's saturation curve into `combined/`. |
 | `performance.chunk_rows` | int | `25000000` | Rows per preallocated numpy buffer in the read scan. |
 | `performance.gzip_binaries` | list | `[libdeflate-gzip, gzip]` | Decompressors to try, in order. |
-| `compatibility.*` | bool | `false` | Opt-in fixes for defects carried over from the original pipeline. See `src/signalseq/compatibility.py`. |
+| `compatibility.reproduce_original` | bool | `false` | Turns **every** defect fix off at once, reproducing the original pipeline's numbers. Overrides the individual flags. |
+| `compatibility.fix_valid_cell_barcode_counter` | bool | `true` | Count every read whose barcode rounds resolve, rather than only those that also matched an ADT tag. |
+| `compatibility.fix_missing_timepoint_label` | bool | `true` | Use the unassigned label for an unparseable timepoint instead of the literal `<NA>`. |
 
 ---
 
@@ -483,6 +492,39 @@ Either name one with `--sublibrary`, or use `run-multi` to process them all.
 **`N duplicate cell barcodes across sublibraries after prefixing`**
 `cell_barcode.name_template` must include `{sublibrary}`, or barcodes from
 different sublibraries collide during aggregation.
+
+---
+
+## Differences from the original pipeline
+
+This package was ported from an earlier script-driven pipeline and verified
+bit-identical to it on a full sublibrary (224M read pairs): the raw and filtered
+count matrices, the CLR matrix, the complete read funnel, the knee, and the
+saturation curve all matched exactly.
+
+Two defects were found during that port. Both are **fixed by default**, because
+once equivalence has been demonstrated, shipping known-wrong numbers is worse
+than a documented difference. Set `compatibility.reproduce_original: true` to
+turn both off and reproduce the original exactly.
+
+1. **`valid_cell_barcode` double-counted `valid_all`.** The original applied the
+   ADT-tag gate before barcode correction, so correction never saw a read whose
+   tag failed, and the two counters were incremented at the same point — making
+   them always equal and `valid_cell_barcode` meaningless. Fixed, it reports what
+   its name says. **Affects `processing_stats.valid_cell_barcode` only**; no
+   matrix, cell call or other counter moves.
+
+2. **An unparseable timepoint rendered as the literal `<NA>`.** The original built
+   `condition` by concatenating a pandas `Int64` cast to `str`, so a missing
+   timepoint produced strings like `MonoCulture_<NA>hr_SN-38`. Fixed, it uses
+   `sample_annotation.unassigned_label`. **Affects `obs.condition` and anything
+   grouped by it**; counts are untouched. This is latent for a layout whose rows
+   all parse cleanly.
+
+The package also writes a reads-per-barcode array for **every** declared barcode
+round (`uns['reads_per_<round>']`), where the original kept only the first, and
+generates `uns['barcode_structure']` from the read structure rather than
+hand-writing it, so it cannot drift from the actual offsets.
 
 ---
 

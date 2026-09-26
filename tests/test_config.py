@@ -209,10 +209,8 @@ def test_defaults_reproduce_the_original_parameters(v3like, out_dir):
     }
     assert cfg.filtering["knee"]["exclude_top_n"] == 3
     assert cfg.performance["chunk_rows"] == 25_000_000
-    assert cfg.compatibility == {
-        "fix_valid_cell_barcode_counter": False,
-        "fix_missing_timepoint_label": False,
-    }
+    # Pinned explicitly, and equal to scanpy's own default so it is a no-op today.
+    assert cfg.qc["analysis"]["pca_random_state"] == 0
 
 
 def test_shipped_example_config_is_structurally_valid():
@@ -232,8 +230,11 @@ def test_shipped_example_config_is_structurally_valid():
     assert data["filtering"]["min_adts_detected"] == 1
     # Linkers must ship disabled: the original never inspects them.
     assert all(l["enabled"] is False for l in data["read_structure"]["linkers"])
-    # And no defect fixes on by default.
-    assert all(v is False for v in data["compatibility"].values())
+    # Defect fixes ship ON, with the escape hatch off.
+    compat = data["compatibility"]
+    assert compat["reproduce_original"] is False
+    assert compat["fix_valid_cell_barcode_counter"] is True
+    assert compat["fix_missing_timepoint_label"] is True
 
 
 def test_example_config_contains_no_real_paths():
@@ -243,3 +244,53 @@ def test_example_config_contains_no_real_paths():
     assert "/Users/" not in text
     assert "/home/" not in text
     assert "PATH/TO" in text
+
+
+# -- compatibility flags ---------------------------------------------------
+
+def test_defect_fixes_are_on_by_default(v3like, out_dir):
+    cfg = load_config(_write(v3like, out_dir))
+    from signalseq.compatibility import FIXES, active_fixes
+    assert len(active_fixes(cfg.compatibility)) == len(FIXES)
+
+
+def test_reproduce_original_turns_every_fix_off(v3like, out_dir):
+    cfg = load_config(_write(v3like, out_dir,
+                             compatibility={"reproduce_original": True}))
+    from signalseq.compatibility import active_fixes
+    assert active_fixes(cfg.compatibility) == ()
+    assert cfg.compatibility["fix_valid_cell_barcode_counter"] is False
+    assert cfg.compatibility["fix_missing_timepoint_label"] is False
+
+
+def test_reproduce_original_overrides_an_explicit_fix(v3like, out_dir):
+    """The single switch wins, so an equivalence run cannot be half-fixed."""
+    cfg = load_config(_write(v3like, out_dir, compatibility={
+        "reproduce_original": True,
+        "fix_valid_cell_barcode_counter": True,
+    }))
+    assert cfg.compatibility["fix_valid_cell_barcode_counter"] is False
+
+
+def test_individual_fix_can_be_disabled(v3like, out_dir):
+    cfg = load_config(_write(v3like, out_dir, compatibility={
+        "fix_missing_timepoint_label": False,
+    }))
+    assert cfg.compatibility["fix_valid_cell_barcode_counter"] is True
+    assert cfg.compatibility["fix_missing_timepoint_label"] is False
+
+
+def test_unknown_compatibility_flag_is_refused(v3like, out_dir):
+    with pytest.raises(ConfigError, match="unknown flag"):
+        load_config(_write(v3like, out_dir, compatibility={"fix_typo_here": True}))
+
+
+def test_non_boolean_compatibility_flag_is_refused(v3like, out_dir):
+    with pytest.raises(ConfigError, match="true or false"):
+        load_config(_write(v3like, out_dir,
+                           compatibility={"fix_missing_timepoint_label": "yes"}))
+
+
+def test_bad_pca_random_state_is_refused(v3like, out_dir):
+    with pytest.raises(ConfigError, match="pca_random_state"):
+        load_config(_write(v3like, out_dir, qc={"analysis": {"pca_random_state": -1}}))

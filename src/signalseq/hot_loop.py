@@ -146,31 +146,55 @@ def scan_sublibrary(r1_path, r2_path,
         if too_short:
             continue
 
-        adt_idx = adt_lookup(adt_seq[adt_start:adt_end])
-        if adt_idx is None:
-            continue
-        stats["valid_adt"] += 1
-
+        # A read failing a linker check is malformed, so that gate precedes
+        # everything else. (No effect on a chemistry with no enabled linkers,
+        # which includes Parse v3.)
         if active_linkers:
             seqs = {"R1": r1_seq, "R2": r2_seq}
             if not all(l.matches(seqs[l.read]) for l in active_linkers):
                 stats["linker_mismatch"] += 1
                 continue
 
-        combo, is_exact = correct(barcode_seq)
-        if combo is None:
-            continue
+        # The two orderings below differ ONLY in when barcode correction runs
+        # relative to the ADT-tag gate, and therefore in what
+        # `valid_cell_barcode` can observe.
+        #
+        # Original: the ADT gate comes first, so correction never sees a read
+        # whose tag failed, and valid_cell_barcode is incremented at the same
+        # point as valid_all -- making the two necessarily equal and the former
+        # meaningless.
+        #
+        # Fixed: correction runs first, so valid_cell_barcode counts every read
+        # whose barcode rounds resolve, independent of its ADT tag, which is
+        # what the name says. Correction is the expensive step, but the ADT gate
+        # only rejects a few percent of reads, so running it on all of them
+        # rather than on the survivors costs a few percent -- far less than the
+        # second FASTQ pass this used to take.
+        if fix_valid_cell_barcode_counter:
+            combo, is_exact = correct(barcode_seq)
+            if combo is not None:
+                stats["valid_cell_barcode"] += 1
+
+            adt_idx = adt_lookup(adt_seq[adt_start:adt_end])
+            if adt_idx is None:
+                continue
+            stats["valid_adt"] += 1
+
+            if combo is None:
+                continue
+        else:
+            adt_idx = adt_lookup(adt_seq[adt_start:adt_end])
+            if adt_idx is None:
+                continue
+            stats["valid_adt"] += 1
+
+            combo, is_exact = correct(barcode_seq)
+            if combo is None:
+                continue
+            stats["valid_cell_barcode"] += 1
+
         if is_exact:
             stats["bc_exact_triple"] += 1
-
-        # In the original, both counters are incremented at this same point,
-        # after the ADT match has already skipped the read -- so
-        # valid_cell_barcode can never exceed valid_all and the two are always
-        # equal. Ported as-is; the fix flag counts every read whose barcode
-        # resolved, regardless of whether its ADT tag matched, which is what
-        # the name implies. See compatibility.py.
-        if not fix_valid_cell_barcode_counter:
-            stats["valid_cell_barcode"] += 1
         stats["valid_all"] += 1
 
         cell_total = 0
@@ -198,26 +222,3 @@ def scan_sublibrary(r1_path, r2_path,
         cell_id_arr, adt_idx_arr, umi_arr = chunks[0]
 
     return cell_id_arr, adt_idx_arr, umi_arr, stats, reads_per_round
-
-
-def count_barcode_resolved(r2_path, read_structure: ReadStructure,
-                           corrector: BarcodeCorrector,
-                           gzip_binaries: Sequence[str],
-                           max_reads: int | None = None) -> int:
-    """Reads whose barcode rounds all resolve, ignoring the ADT tag.
-
-    Only used by the fixed `valid_cell_barcode` counter, which needs a number
-    the ADT-first funnel cannot produce.
-    """
-    from .fastq_io import iter_sequences
-
-    rounds = read_structure.rounds
-    min_len = read_structure.min_length(rounds[0].read)
-    n = 0
-    for seq in iter_sequences(r2_path, gzip_binaries, max_reads=max_reads):
-        if len(seq) < min_len:
-            continue
-        combo, _ = corrector.correct(seq)
-        if combo is not None:
-            n += 1
-    return n
