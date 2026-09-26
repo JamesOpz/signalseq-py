@@ -76,11 +76,12 @@ def build_raw_anndata(cell_id: np.ndarray, adt_idx: np.ndarray, count: np.ndarra
     adata.var["detection_rate"] = adata.var["n_cells_detected"] / max(n_cells, 1)
 
     adata.uns["processing_stats"] = stats
-    # The original stored a single reads-per-RT array; one array per round is a
-    # superset, and the RT entry is unchanged.
+    # Keyed by ELEMENT NAME, not obs_label: the original stored one array under
+    # "reads_per_rt", and the Parse v3 config names that round `rt`, so the key
+    # matches. Rounds beyond the first are additional -- the original kept only
+    # the RT round.
     for name, arr in reads_per_round.items():
-        label = read_structure[name].label
-        adata.uns[f"reads_per_{label}"] = arr
+        adata.uns[f"reads_per_{name}"] = arr
     adata.uns["sublibrary"] = sublibrary_name
     adata.uns["barcode_structure"] = {
         f"{el.read}_{el.label}": f"{el.start0}-{el.end0}"
