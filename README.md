@@ -28,22 +28,6 @@ offsets and lengths.
   `phate`). Without it, set `qc.analysis.enabled: false` to write counts and
   core QC only.
 
-### A note on numerical reproducibility
-
-Counts are **bit-exact** regardless of environment: barcode matching and UMI
-collapse are integer operations in this package.
-
-The downstream CLR / PCA / PHATE numbers are only bit-reproducible within a
-**fixed dependency set**. This is not hypothetical — running the *same*
-pipeline code three months apart, with identical inputs and bit-identical
-counts and CLR values, produced `X_pca` differing by 3e-5 and a PHATE embedding
-differing by ~0.01, purely from library upgrades in between. The PCA seed is now
-pinned (`qc.analysis.pca_random_state`), which removes one source of this, but
-`scipy`'s ARPACK implementation and `muon`'s CLR can still change between
-versions. If you need to compare embeddings across machines or over time, pin
-your environment. `provenance.json` records the versions actually used for every
-run.
-
 ---
 
 ## Install
@@ -167,11 +151,6 @@ Rough figures from a 16 GB laptop, per sublibrary of ~225M read pairs:
 sort dominates peak memory, so running them concurrently risks swapping. Four
 sublibraries of this size take roughly 100 minutes end to end.
 
-If `--debug-reads` is small, note that `matching.cell_barcode.census.offset_reads`
-defaults to 3,000,000 — a slice shorter than that leaves the census empty and
-silently reduces barcode correction to exact matching. Set `offset_reads: 0` when
-working with small test files.
-
 ### The four commands
 
 | Command | What it does |
@@ -184,44 +163,6 @@ working with small test files.
 Useful flags: `--debug-reads N` caps the scan at N read pairs for a smoke test;
 `run-multi --continue-on-error` carries on if one sublibrary fails;
 `validate --skip-read-check` skips opening the FASTQs.
-
----
-
-## Outputs stay outside the repository
-
-`run.output_dir` **must resolve outside the git checkout**, and config validation
-refuses it otherwise:
-
-```
-run.output_dir resolves to /path/to/signalseq-py/outs/run1, which is inside the
-signalseq repository (/path/to/signalseq-py). Outputs, intermediates, logs and
-plots must live outside the repo so they can never be committed.
-```
-
-The reason is that outputs are both large and partly un-shareable. A single
-sublibrary produces hundreds of megabytes of `.h5ad`, and those matrices, the
-plots and the barcode-derived tables are all derived from sequencing data and
-from licensed Parse barcode whitelists. Keeping them out of the tree means they
-can never be committed by accident, so the repository stays shareable and small.
-The same applies to the reference files themselves: the Parse barcode CSVs and
-edit-distance dictionaries, the ADT panel table and the RT plate layout are named
-by the config and are **not** stored in this repository.
-
-A layout that works well:
-
-```
-~/analysis/
-  signalseq-py/              <- this repo, code only
-  reference/                 <- barcode whitelists, ADT panel, RT layout
-  runs/
-    2026_parse_v3_run_1/     <- run.output_dir
-  configs/
-    my_run.yaml
-```
-
-Relative paths inside a config resolve against **the config file's own
-directory**, not the shell's working directory, so a config and its reference
-files can be moved around together.
 
 ---
 
@@ -259,14 +200,6 @@ R2  (58bp sequenced, all 58bp used)
 Cell barcode = rt * 96 * 96  +  bc2 * 96  +  bc3          (912,384 combinations)
 obs_names    = {sublibrary}_{rt}_{bc2}_{bc3}
 ```
-
-**Why the linkers are not checked.** The original pipeline skips them without
-inspecting them, and that is the right default here: `linker_bc2_rt` matches
-exactly in only ~76% of reads, because there is a common 1-mismatch variant
-(`TCCAATCACCTC`). An exact check would discard roughly a quarter of all reads.
-They are declared in the config so the layout is documented and so a future
-anchor-based locator has something to search for; `enabled: false` is what
-reproduces the original.
 
 ### Adapting to a different chemistry
 
@@ -334,9 +267,12 @@ Two constraints to be aware of:
 which is often easier to work from while editing. The table here is the canonical
 list.
 
-Any section may be omitted, in which case the defaults below apply — and those
-defaults reproduce the pipeline this package was ported from. `read_structure`
-and `inputs` have no useful defaults and are required.
+Any section may be omitted, in which case the defaults below apply.
+`read_structure` and `inputs` have no useful defaults and are required.
+
+Relative paths inside a config resolve against **the config file's own
+directory**, not the shell's working directory, so a config and its reference
+files can be moved around together.
 
 ### `run`
 
@@ -437,7 +373,7 @@ barcode-rank curve.
 | `analysis.enabled` | bool | `true` | Run CLR + PCA + PHATE. False skips it and drops the `muon`/`phate` requirement. |
 | `analysis.n_pcs` | int | `10` | Principal components; capped at `n_vars - 1`. |
 | `analysis.pca_svd_solver` | str | `arpack` | Passed to scanpy. |
-| `analysis.pca_random_state` | int | `0` | Seed for the PCA solver, pinned explicitly. ARPACK's result depends on its starting vector, so leaving this to the library default lets a `scanpy`/`scipy` upgrade shift the PCA and, through it, PHATE. `0` matches scanpy's current default, so setting it changes nothing today. |
+| `analysis.pca_random_state` | int | `0` | Seed for the PCA solver, set explicitly because ARPACK's result depends on its starting vector. `0` matches scanpy's default. |
 | `analysis.phate.*` | map | `knn 15, decay 40, t auto, random_state 42` | Passed to PHATE, plus `n_jobs` from `run.threads`. |
 | `plots.enabled` | bool | `true` | Write figures. |
 | `plots.dpi` | int | `150` | Figure resolution. |
@@ -538,121 +474,6 @@ everywhere else.
 
 ---
 
-## Troubleshooting
-
-**`run.output_dir resolves to … which is inside the signalseq repository`**
-Point `output_dir` somewhere outside the checkout. See *Outputs stay outside the
-repository*.
-
-**`run.output_dir is not empty`**
-A previous run is there. Use a fresh directory, or set `run.overwrite: true`.
-
-**`inputs.whitelists.X (file.csv) holds 8bp barcodes but read_structure.elements.Y.length is 7`**
-The declared length disagrees with the file. Fix whichever is wrong — usually the
-config. The same check applies to `adt_panel`.
-
-**`the read structure needs 58bp but 1000/1000 of the first reads are shorter (min 45bp). Element(s) running past the end: rt: R2 51..58`**
-An element runs off the end of the reads. Either the offsets are wrong for this
-chemistry, or the FASTQs are trimmed. Remember `start` is **1-based**: the first
-base is 1, not 0.
-
-**`read_structure: elements overlap on the same read`**
-Two elements' spans intersect — nearly always a typo in a `start` or `length`. If
-genuinely intended, set `allow_overlap: true` on one.
-
-**`This chemistry needs 68 bits to pack (cell, ADT, UMI) into one integer, over the 64-bit limit`**
-The combined cell space, panel size and UMI length don't fit. Shorten the UMI
-element or reduce whitelist sizes.
-
-**`qc.analysis.enabled is true, which needs the optional analysis extras`**
-Run `pip install -e '.[analysis]'`, or set `qc.analysis.enabled: false`.
-
-**`WARNING: skipping CLR/PCA/PHATE. Only N cell(s) x M ADT(s) passed filtering`**
-Too few cells were called for an embedding to mean anything, so that stage is
-skipped and everything else is still written. Almost always a full-depth
-`filtering.min_umi_per_cell` applied to a `--debug-reads` slice. Lower it, set it
-to `null` to use the detected knee, or set `qc.analysis.enabled: false` if you only
-want counts.
-
-**Everything validates but almost no reads are assigned.**
-Check the `funnel` figure. If `valid_adt` is high but `valid_all` is low, the cell
-barcode is the problem — confirm the round offsets and that
-`matching.cell_barcode.census` samples a window that actually exists in your file
-(with `offset_reads: 3000000`, a file with fewer than ~4M reads gives an empty
-census, so only exact barcode matches are ever accepted). If `valid_adt` itself is
-low, check the ADT offsets and that the panel file matches the antibodies used.
-
-**`Unknown config section(s) ['filterring']`**
-A top-level section name is misspelled. Unknown sections are rejected rather than
-ignored, because a silently dropped `filtering:` block would quietly revert your
-thresholds to defaults.
-
-**`compatibility: this section no longer exists`**
-An older config. The two ported defects are now fixed unconditionally; delete the
-section. See *Differences from the original pipeline*.
-
-**`--sublibrary is required when the config lists more than one`**
-Either name one with `--sublibrary`, or use `run-multi` to process them all.
-
-**`N duplicate cell barcodes across sublibraries after prefixing`**
-`cell_barcode.name_template` must include `{sublibrary}`, or barcodes from
-different sublibraries collide during aggregation.
-
----
-
-## Differences from the original pipeline
-
-This package was ported from an earlier script-driven pipeline and verified
-bit-identical to it on a full sublibrary (224M read pairs): the raw and filtered
-count matrices, the CLR matrix, the complete read funnel, the knee, and the
-saturation curve all matched exactly.
-
-Two defects were found during that port, and **both are now fixed
-unconditionally** — there is no flag to restore the old behaviour. Equivalence
-with the original was demonstrated first, at full scale, so the fixes are known
-to change only what they claim to. If you need to reproduce a pre-fix result,
-check out commit `d225860` or earlier, which still carried the opt-out.
-
-1. **`valid_cell_barcode` double-counted `valid_all`.** The original applied the
-   ADT-tag gate before barcode correction, so correction never saw a read whose
-   tag failed, and the two counters were incremented at the same point — making
-   them always equal and `valid_cell_barcode` meaningless. Fixed, it reports what
-   its name says. **Affects `processing_stats.valid_cell_barcode` only**; no
-   matrix, cell call or other counter moves.
-
-   Measured on a 224,465,769-read sublibrary: `valid_cell_barcode` reports
-   163,753,195 where the original reported 157,029,873 (**+6,723,322, +4.28%**) —
-   the reads whose cell barcode resolves but whose ADT tag did not match. Every
-   other funnel counter, the knee, the cells called, the per-condition counts and
-   both count matrices are unchanged. Because correction now runs on all reads
-   rather than the ~96% passing the ADT gate, the scan costs about **3% more
-   time** (802s vs 778s) and no extra pass over the FASTQ.
-
-   **Consequence to be aware of:** `valid_cell_barcode` is no longer equal to
-   `valid_all`, and `overall_valid_rate` is still computed from `valid_all`, so
-   that rate is unchanged. Any downstream script that assumed the two counters
-   were interchangeable needs checking.
-
-2. **An unparseable timepoint rendered as the literal `<NA>`.** The original built
-   `condition` by concatenating a pandas `Int64` cast to `str`, so a missing
-   timepoint produced strings like `MonoCulture_<NA>hr_SN-38`. Fixed, it uses
-   `sample_annotation.unassigned_label`. **Affects `obs.condition` and anything
-   grouped by it**; counts are untouched. This is latent for a layout whose rows
-   all parse cleanly — on the sublibrary above it changed nothing, since every
-   layout row parsed. It is insurance, not a correction to existing results.
-
-A third change is not a defect fix but guards against a real failure seen during
-the port: `qc.analysis.pca_random_state` is now passed explicitly instead of
-relying on scanpy's default. It defaults to `0`, which is scanpy's current
-default, so it changes nothing today.
-
-The package also writes a reads-per-barcode array for **every** declared barcode
-round (`uns['reads_per_<round>']`), where the original kept only the first, and
-generates `uns['barcode_structure']` from the read structure rather than
-hand-writing it, so it cannot drift from the actual offsets.
-
----
-
 ## Development
 
 ```bash
@@ -661,9 +482,9 @@ pytest                                   # synthetic FASTQs, no real data needed
 ```
 
 Tests build their own FASTQs in-test against two deliberately different read
-structures, so extraction is exercised under more than one chemistry rather than
-only the one this package was ported from. Both shipped configs are also parsed
-and structurally validated by the suite, so they cannot drift from the code.
+structures, so extraction is exercised under more than one chemistry. Both
+shipped configs are also parsed and structurally validated by the suite, so they
+cannot drift from the code.
 
 To check a run against a reference run:
 
