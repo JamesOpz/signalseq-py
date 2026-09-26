@@ -514,12 +514,21 @@ turn both off and reproduce the original exactly.
    its name says. **Affects `processing_stats.valid_cell_barcode` only**; no
    matrix, cell call or other counter moves.
 
+   Measured on a 224,465,769-read sublibrary: `valid_cell_barcode` rises from
+   157,029,873 to 163,753,195 (**+6,723,322, +4.28%**) — the reads whose cell
+   barcode resolves but whose ADT tag did not match. Every other funnel counter,
+   the knee, the cells called, the per-condition counts and both count matrices
+   are bit-identical. Because correction now runs on all reads rather than the
+   ~96% passing the ADT gate, the scan costs about **3% more time** (802s vs
+   778s) and no extra pass over the FASTQ.
+
 2. **An unparseable timepoint rendered as the literal `<NA>`.** The original built
    `condition` by concatenating a pandas `Int64` cast to `str`, so a missing
    timepoint produced strings like `MonoCulture_<NA>hr_SN-38`. Fixed, it uses
    `sample_annotation.unassigned_label`. **Affects `obs.condition` and anything
    grouped by it**; counts are untouched. This is latent for a layout whose rows
-   all parse cleanly.
+   all parse cleanly — on the sublibrary above it changed nothing, since every
+   layout row parsed. It is insurance, not a correction to existing results.
 
 The package also writes a reads-per-barcode array for **every** declared barcode
 round (`uns['reads_per_<round>']`), where the original kept only the first, and
