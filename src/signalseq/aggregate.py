@@ -94,17 +94,24 @@ def aggregate(cfg: Config, sublibrary_dirs: list[Path] | None = None) -> Path:
     log(f"Combined: {combined.n_obs:,} cells x {combined.n_vars} ADTs "
         f"from {len(adatas)} sublibraries")
 
+    analysis_ran = False
     if cfg.qc["analysis"]["enabled"]:
         from . import analysis
-        log("Rerunning CLR normalization + PCA + PHATE jointly on pooled data")
-        t0 = time.time()
-        combined = analysis.run_clr_pca_phate(combined, cfg.qc["analysis"], cfg.threads)
-        log(f"CLR/PCA/PHATE done in {time.time()-t0:.1f}s")
+        try:
+            analysis.check_analysis_feasible(combined, cfg.qc["analysis"])
+        except analysis.InsufficientCellsError as exc:
+            log(f"WARNING: skipping CLR/PCA/PHATE.\n{exc}")
+        else:
+            log("Rerunning CLR normalization + PCA + PHATE jointly on pooled data")
+            t0 = time.time()
+            combined = analysis.run_clr_pca_phate(combined, cfg.qc["analysis"], cfg.threads)
+            log(f"CLR/PCA/PHATE done in {time.time()-t0:.1f}s")
+            analysis_ran = True
 
     if plots_on:
         round_labels = [el.label for el in cfg.read_structure.rounds]
         plotter.well_heatmaps(combined, "combined", round_labels)
-        if cfg.qc["analysis"]["enabled"]:
+        if analysis_ran:
             plotter.clr_distributions(combined)
             plotter.pca_suite(combined)
             plotter.phate_suite(combined)
@@ -112,7 +119,7 @@ def aggregate(cfg: Config, sublibrary_dirs: list[Path] | None = None) -> Path:
             plotter.adt_correlation(combined)
         plotter.cells_per_sample(combined)
         plotter.qc_by_sample(combined)
-        if cfg.qc["analysis"]["enabled"]:
+        if analysis_ran:
             plotter.adt_heatmap_by_sample(combined)
         plotter.umi_by_sublibrary(adatas, [s["sublibrary"] for s in all_stats])
 

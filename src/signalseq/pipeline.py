@@ -146,13 +146,24 @@ def process_sublibrary(cfg: Config, name: str, debug_reads: int | None = None) -
         if plots_on:
             plotter.saturation_curve(saturation_df)
 
+    analysis_ran = False
     if cfg.qc["analysis"]["enabled"]:
         from . import analysis
-        log("Running CLR normalization + PCA + PHATE")
-        t0 = time.time()
-        filtered = analysis.run_clr_pca_phate(filtered, cfg.qc["analysis"], cfg.threads)
-        log(f"CLR/PCA/PHATE done in {time.time()-t0:.1f}s")
+        try:
+            # Checked before the expensive work, so a doomed run says why up front
+            # instead of failing later inside a solver.
+            analysis.check_analysis_feasible(filtered, cfg.qc["analysis"])
+        except analysis.InsufficientCellsError as exc:
+            log(f"WARNING: skipping CLR/PCA/PHATE.\n{exc}")
+            log("Counts, core QC and the remaining plots are still written.")
+        else:
+            log("Running CLR normalization + PCA + PHATE")
+            t0 = time.time()
+            filtered = analysis.run_clr_pca_phate(filtered, cfg.qc["analysis"], cfg.threads)
+            log(f"CLR/PCA/PHATE done in {time.time()-t0:.1f}s")
+            analysis_ran = True
 
+    if analysis_ran:
         if plots_on:
             plotter.clr_distributions(filtered)
             plotter.pca_suite(filtered)

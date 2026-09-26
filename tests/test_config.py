@@ -280,9 +280,35 @@ def test_unknown_top_level_section_is_refused(v3like, out_dir):
         load_config(path)
 
 
+def test_annotated_template_loads_and_is_self_consistent():
+    """The teaching template must stay valid as the schema evolves."""
+    root = repo_root()
+    cfg = load_config(root / "configs" / "annotated_template.yaml")
+    rs = cfg.read_structure
+    # Its documented layout: two rounds, ADT on R2, UMI last, nothing at base 1.
+    assert [e.name for e in rs.rounds] == ["cb1", "cb2"]
+    assert rs.adt.read == "R2"
+    assert rs.umi.start1 > rs.adt.start1
+    assert rs.min_length("R1") == 24
+    assert rs.min_length("R2") == 28
+    assert rs.overlaps() == []
+    assert "{sublibrary}" in rs.name_template
+    # Linkers documented but not enforced.
+    assert all(not l.enabled for l in rs.linkers)
+
+
+def test_annotated_template_contains_no_real_paths():
+    root = repo_root()
+    text = (root / "configs" / "annotated_template.yaml").read_text()
+    assert "/Users/" not in text
+    assert "/home/" not in text
+    assert "PATH/TO" in text
+
+
 def test_all_example_config_sections_are_recognised():
     """Guards against the shipped example drifting from KNOWN_SECTIONS."""
     from signalseq.config import KNOWN_SECTIONS
     root = repo_root()
-    data = yaml.safe_load(open(root / "configs" / "parse_v3.example.yaml"))
-    assert set(data) <= KNOWN_SECTIONS, sorted(set(data) - KNOWN_SECTIONS)
+    for name in ("parse_v3.example.yaml", "annotated_template.yaml"):
+        data = yaml.safe_load(open(root / "configs" / name))
+        assert set(data) <= KNOWN_SECTIONS, (name, sorted(set(data) - KNOWN_SECTIONS))

@@ -1,0 +1,401 @@
+# ===========================================================================
+# signalseq — ANNOTATED TEMPLATE
+#
+# A teaching config. Every field the pipeline understands appears below, each
+# with an explanation of what it does and what happens if you get it wrong.
+#
+#   >>> This describes an INVENTED chemistry, to show how the read structure is
+#   >>> declared. Do NOT run it as-is on Parse Evercode WT v3 data — start from
+#   >>> configs/parse_v3.example.yaml for that.
+#
+# Two rules worth knowing before you edit anything:
+#
+#   1. All read coordinates are 1-BASED and INCLUSIVE of `start`. The first base
+#      of a read is position 1, not 0.
+#   2. `run.output_dir` must resolve OUTSIDE this git repository. Validation
+#      refuses anything inside it.
+#
+# Relative paths resolve against THIS FILE's directory, not your shell's working
+# directory, so a config and its reference files can be moved together.
+#
+# Check your edits before running anything:
+#     signalseq adt validate --config this_file.yaml
+# ===========================================================================
+
+# Guards against a config written for a future, incompatible layout.
+schema_version: 1
+
+
+# ---------------------------------------------------------------------------
+# run — identity, destination, resources
+# ---------------------------------------------------------------------------
+run:
+  # Free-text label. Recorded in provenance.json so a result can be traced back.
+  name: demo_custom_chemistry
+
+  # Everything is written here: matrices, plots, tables, provenance.
+  # MUST be outside the repo. A per-sublibrary subdirectory is created for each
+  # entry in inputs.sublibraries, plus combined/ when aggregating.
+  output_dir: /PATH/TO/runs/demo_custom_chemistry
+
+  # -1 = all cores. Only reaches PHATE's n_jobs: the read scan is single-threaded
+  # by design (the GIL serialises the per-record work, so a second reader thread
+  # adds nothing) and decompression already runs in child processes.
+  threads: -1
+
+  # false = refuse to write into a non-empty output_dir. Keeps you from silently
+  # mixing two runs' outputs in one folder.
+  overwrite: false
+
+
+# ---------------------------------------------------------------------------
+# inputs — your FASTQs and the reference tables
+#
+# None of these files live in the repo. You supply them; see the README section
+# "Reference files you need to supply" for the expected columns.
+# ---------------------------------------------------------------------------
+inputs:
+
+  # One entry per sublibrary. `adt run --sublibrary NAME` picks one;
+  # `adt run-multi` processes all of them in this order, then aggregates.
+  # Names must be unique — they prefix the cell barcodes, which is what keeps
+  # barcodes from different sublibraries from colliding when combined.
+  sublibraries:
+    - name: DemoLib_A
+      r1: /PATH/TO/fastq/DemoLib_A_R1_001.fastq.gz
+      r2: /PATH/TO/fastq/DemoLib_A_R2_001.fastq.gz
+    - name: DemoLib_B
+      r1: /PATH/TO/fastq/DemoLib_B_R1_001.fastq.gz
+      r2: /PATH/TO/fastq/DemoLib_B_R2_001.fastq.gz
+
+  # Named barcode whitelists. The names here are arbitrary labels; what matters
+  # is that read_structure.elements.*.whitelist refers to them.
+  #
+  # Declare ONE ENTRY PER BARCODE ROUND even if two rounds read from the same
+  # plate file — point both at the same paths. Files are parsed once and cached,
+  # so repeating them costs nothing, and a chemistry that later uses distinct
+  # plates per round needs no code change.
+  whitelists:
+
+    plate_first:
+      # CSV of allowed barcodes. Every sequence must be the SAME length, and that
+      # length must equal the declared `length` of the element using it —
+      # validation fails loudly if not.
+      csv: /PATH/TO/reference/plate_first.csv
+      sequence_column: sequence      # column holding the barcode sequences
+      well_column: well             # column holding well IDs (e.g. A1..H12).
+                                    # Becomes obs["<obs_label>_well"].
+                                    # Set to null to fall back to the sequence.
+      stype_column: null            # optional extra column (e.g. sample type).
+                                    # When set, colours the reads-per-barcode plot
+                                    # via qc.plots.stype_colors.
+      # Precomputed edit-distance dictionary (the Parse pipeline ships these).
+      # null => EXACT matching only, which is the right choice when you have no
+      # such file. With a file, mismatches up to
+      # matching.cell_barcode.max_edit_distance are recoverable.
+      edit_distance_json: null
+
+    plate_second:
+      csv: /PATH/TO/reference/plate_second.csv
+      sequence_column: sequence
+      well_column: well
+      stype_column: null
+      edit_distance_json: null
+
+  # The antibody panel: which tag sequence means which antigen.
+  adt_panel:
+    csv: /PATH/TO/reference/adt_panel.csv
+    barcode_column: Barcode         # tag sequences; all the same length
+    name_column: Antigen            # becomes var_names — must be UNIQUE
+
+  # Maps a well to a sample name, which is then parsed into the annotation
+  # columns per `sample_annotation` below. Wells missing from this file are
+  # labelled with sample_annotation.unassigned_label rather than failing.
+  rt_layout:
+    csv: /PATH/TO/reference/plate_layout.csv
+    well_column: Well_ID
+    sample_column: Sample_name
+
+
+# ---------------------------------------------------------------------------
+# read_structure — WHERE things are in the reads
+#
+# This is the section that makes the pipeline chemistry-agnostic, and the one
+# most worth getting right. The invented layout below is deliberately unlike
+# Parse v3, to show that nothing about the arrangement is assumed:
+#
+#   R1  1..2    2bp   (unused prefix — simply not declared)
+#       3..8    6bp   cb1, first barcode round
+#       9..14   6bp   (unused gap)
+#      15..24  10bp   cb2, second barcode round
+#
+#   R2  1..4    4bp   (unused prefix)
+#       5..16  12bp   ADT tag
+#      17..20   4bp   linker (declared, not checked)
+#      21..28   8bp   UMI
+#
+# Note there are only TWO barcode rounds here, the ADT tag is on R2 rather than
+# R1, the UMI comes LAST rather than first, and nothing starts at position 1.
+# All of that is fine: lengths, order and read assignment are all free.
+# ---------------------------------------------------------------------------
+read_structure:
+
+  # Only accepted value. Stated explicitly so the convention is never ambiguous.
+  coordinates: one_based
+
+  # Which element is the antibody tag, and which is the UMI. Named rather than
+  # positional, so the elements below can be called anything.
+  adt_element: adt
+  umi_element: umi
+
+  elements:
+    # read:     R1 or R2
+    # start:    1-based first base
+    # length:   bases; for a barcode round this MUST match the whitelist file
+    # whitelist: name from inputs.whitelists, or `adt_panel` for the tag.
+    #            Required for every cell-barcode round.
+    # obs_label: prefix for this element's obs columns —
+    #            obs["<obs_label>_well"] and obs["<obs_label>_sequence"].
+    #            Defaults to the element name.
+    adt: { read: R2, start:  5, length: 12, whitelist: adt_panel,   obs_label: ADT }
+    umi: { read: R2, start: 21, length:  8,                         obs_label: UMI }
+    cb1: { read: R1, start:  3, length:  6, whitelist: plate_first, obs_label: CB1 }
+    cb2: { read: R1, start: 15, length: 10, whitelist: plate_second, obs_label: CB2 }
+
+    # Elements on the same read may NOT overlap — that is almost always a typo,
+    # so it is an error. If a chemistry genuinely nests one inside another, add
+    # `allow_overlap: true` to one of them.
+
+  # Constant sequences between the barcode blocks.
+  #
+  # `enabled: false` means the linker is documented but never inspected, which is
+  # usually what you want: real linkers carry sequencing errors and common
+  # variants, so an exact check throws away good reads. (On Parse v3, checking
+  # one linker exactly would discard ~24% of all reads.)
+  #
+  # Enable one only if you have a reason to, and then you must also give
+  # `max_mismatches` (0 for an exact match).
+  linkers:
+    - name: demo_linker
+      read: R2
+      start: 17
+      length: 4
+      sequence: ACGT
+      max_mismatches: null
+      enabled: false
+
+  cell_barcode:
+    # The rounds that combine into one cell identity, MOST SIGNIFICANT FIRST.
+    # This sets the packing arithmetic:
+    #     cell_id = cb1 * size(cb2) + cb2
+    # Changing the order changes the packed IDs, so keep it stable within a
+    # project if you compare runs.
+    order: [cb1, cb2]
+
+    # How obs_names are built. May reference {sublibrary} and any round, by
+    # element name or obs_label.
+    #
+    # KEEP {sublibrary} IN THIS TEMPLATE: without it, identical barcodes from
+    # different sublibraries collide and aggregation fails with a duplicate-
+    # barcode error.
+    name_template: "{sublibrary}_{cb1}_{cb2}"
+
+
+# ---------------------------------------------------------------------------
+# matching — how much error to forgive
+# ---------------------------------------------------------------------------
+matching:
+
+  adt:
+    # Exact + this many substitutions, as a prebuilt lookup dictionary.
+    # 0 = exact only. 1 is typical. 2 is the supported maximum and builds a
+    # much larger dictionary.
+    max_mismatches: 1
+    # A mutant sequence reachable from two different tags is ambiguous. true
+    # discards it (safe, and the usual choice); false lets the first tag keep it.
+    drop_ambiguous: true
+
+  cell_barcode:
+    # Cap on the distances read from the edit_distance_json files. Ignored when
+    # those are null, since exact matching is then the only option.
+    max_edit_distance: 2
+
+    # A two-pass scheme. First a sample of reads is scanned, keeping only those
+    # where EVERY round matches exactly, and counting how often each combination
+    # of rounds occurs. That distribution yields a count threshold. Then, per
+    # read: all rounds exact -> accept immediately; otherwise gather each round's
+    # candidates at the smallest edit distance that hits, and accept only if
+    # EXACTLY ONE combination clears the threshold (two or more is ambiguous, and
+    # the read is dropped).
+    census:
+      # Where the sample starts, in reads. Skipping the head of the file avoids
+      # the low-diversity first tile.
+      #
+      # CAUTION: if offset_reads + n_reads runs past the end of your file, the
+      # census comes back EMPTY and only exact matches are ever accepted. That
+      # fails silently — you just get fewer assigned reads. For a small test
+      # file, set offset_reads: 0.
+      offset_reads: 3000000
+      n_reads: 1000000
+      # Combination count at this cumulative share of reads becomes the
+      # threshold.
+      perfect_cell_threshold: 0.92
+      # Floor for that threshold, so a shallow sample cannot make it trivially
+      # permissive.
+      min_count_threshold: 5
+      # Whether a combination must exceed the threshold or merely reach it.
+      accept: strictly_greater      # or: greater_or_equal
+
+  umi:
+    # directional = UMI-tools style: cluster UMIs within max_mismatches, letting
+    # a high-count UMI absorb a low-count neighbour. exact = every distinct UMI
+    # is its own molecule.
+    method: directional
+    max_mismatches: 1
+    # Absorb UMI j into seed i only when count_j <= ratio * count_i - 1. Stops
+    # two genuinely independent, similarly abundant molecules from merging.
+    directional_count_ratio: 2
+
+
+# ---------------------------------------------------------------------------
+# filtering — which barcodes are called as cells
+# ---------------------------------------------------------------------------
+filtering:
+  # A fixed UMI floor, or null to use the automatically detected knee.
+  # A fixed floor is useful for a deliberately permissive first pass, e.g. when
+  # final filtering will be done jointly with the RNA modality. The knee is
+  # computed and drawn on the QC plots either way.
+  min_umi_per_cell: null
+
+  # Optional upper cap, for excluding likely multiplets. null = no cap.
+  max_umi_per_cell: null
+
+  # A barcode must show at least this many distinct ADTs. Combined with the UMI
+  # threshold as AND.
+  min_adts_detected: 2
+
+  knee:
+    # Ranks skipped when fitting the chord, where the curve is steep and noisy.
+    exclude_top_n: 3
+
+
+# ---------------------------------------------------------------------------
+# qc — saturation curve, embeddings, plot appearance
+# ---------------------------------------------------------------------------
+qc:
+
+  saturation:
+    # Subsample reads to increasing depths and recompute complexity, to show
+    # whether more sequencing would still yield new molecules.
+    enabled: true
+    fractions: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]  # ascending, each in (0,1]
+    seed: 0                       # fixed, so the curve is reproducible
+
+  analysis:
+    # CLR normalisation + PCA + PHATE. Set false for counts and core QC only —
+    # that also drops the need for the optional muon/phate dependencies.
+    enabled: true
+    n_pcs: 10                     # capped at n_vars - 1
+    pca_svd_solver: arpack
+    # Pinned deliberately. ARPACK's result depends on its starting vector, so
+    # leaving this to the library default lets a scanpy/scipy upgrade shift the
+    # PCA and, through it, the PHATE embedding. 0 is scanpy's own default.
+    pca_random_state: 0
+    phate:
+      n_components: 2
+      knn: 15
+      decay: 40
+      t: auto
+      random_state: 42
+
+  plots:
+    enabled: true
+    dpi: 150
+    style: seaborn-v0_8-whitegrid  # ignored if matplotlib lacks it
+
+    # Plate geometry for the well heatmaps. A whitelist larger than this grid
+    # still counts everywhere else, but its extra wells will not be drawn.
+    plate_rows: [A, B, C, D, E, F, G, H]
+    plate_cols: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+
+    grid_columns: 4               # columns in the per-ADT panel grids
+    color_percentiles: [5, 95]    # colour limits, as percentiles, so outliers
+                                  # do not flatten the scale
+
+    # One colormap per barcode round, in cell_barcode.order; cycled if short.
+    well_heatmap_cmaps: [Blues, Greens, Oranges]
+
+    # Colour per value of the whitelist's stype column. Leave {} if unused.
+    stype_colors: {}
+
+    # Ordering and palette for the per-condition composition plots. Values must
+    # match what sample_annotation produces.
+    treatment_order: []
+    culture_colors: {}
+    unassigned_label: Unassigned
+
+
+# ---------------------------------------------------------------------------
+# sample_annotation — turning a sample name into obs columns
+#
+# Purely cosmetic: this never affects counts. Sample names are read as three
+# underscore-separated tokens, in one of two shapes:
+#
+#     treated:  {culture}_{timepoint}_{anything}     e.g. LineA_24hr_Dosed
+#     control:  {culture}_{control_token}_{timepoint} e.g. LineA_VEHICLE_24hrs
+#
+# Anything else gets treatment "Unknown" and a missing timepoint, rather than
+# failing the run over a label.
+# ---------------------------------------------------------------------------
+sample_annotation:
+  # Which barcode round carries sample identity. The layout is joined on
+  # obs["<that round's obs_label>_well"].
+  join_on_round: cb1
+
+  # Rename the first token to something readable. Tokens not listed pass through.
+  culture_map:
+    LineA: CellLineA
+    LineB: CellLineB
+
+  treatment:
+    control_token: VEHICLE        # token in position 2 marking a control
+    control_label: Vehicle        # what to call those wells
+    treated_label: Dosed          # what to call everything else
+
+  # Used for wells absent from the layout, and for a timepoint that will not
+  # parse.
+  unassigned_label: Unassigned
+
+  # How obs["condition"] is composed from the parsed parts.
+  condition_template: "{culture_type}_{timepoint_hrs}hr_{treatment}"
+
+
+# ---------------------------------------------------------------------------
+# outputs — which artifacts to write
+#
+# resolved_config.yaml and provenance.json are always written, so a result can
+# always be traced back to the parameters and commit that produced it.
+# ---------------------------------------------------------------------------
+outputs:
+  raw_anndata: true               # <name>_raw.h5ad — ALL candidate barcodes
+  filtered_anndata: true          # <name>_filtered.h5ad — called cells only
+  saturation_table: true          # <name>_saturation.csv
+  qc_stats: true                  # <name>_qc_stats.json
+  figures: true                   # figures/<name>_*.png
+  aggregate:
+    combined_anndata: true        # combined/combined_filtered.h5ad
+    combined_qc_stats: true
+    copy_best_saturation: true    # copy the best sublibrary's curve into combined/
+
+
+# ---------------------------------------------------------------------------
+# performance — throughput and memory, not results
+# ---------------------------------------------------------------------------
+performance:
+  # Rows per preallocated numpy buffer in the read scan. Larger uses more memory
+  # but concatenates less; this default is comfortable on a 16 GB machine.
+  chunk_rows: 25000000
+
+  # Decompressors to try, in order, before falling back to Python's gzip module.
+  # Results are identical either way; this only affects speed.
+  gzip_binaries: [libdeflate-gzip, gzip]

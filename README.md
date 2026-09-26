@@ -68,24 +68,109 @@ pytest                             # the test suite builds its own synthetic FAS
 
 ---
 
+## Reference files you need to supply
+
+**These are not in the repository** — they are licensed or experiment-specific
+data. Gather them first; the config names their paths. Column names are
+configurable, so yours need not match these, but the *shape* does.
+
+| File | Where it comes from | Shape |
+|---|---|---|
+| RT barcode table | Parse Biosciences pipeline (`bc_data_rt.csv`) | one row per barcode; columns for sequence, well, and optionally a sample-type code. All sequences the same length. |
+| Ligation barcode table | Parse Biosciences pipeline (`bc_data_ligation.csv`) | same shape. Parse v3 uses this one file for **both** ligation rounds. |
+| RT edit-distance dictionary | Parse Biosciences pipeline (`bc_dict_n99_v5.json`) | JSON, top-level keys `"0"`,`"1"`,`"2"`,… mapping an observed sequence to the list of true sequences at that edit distance. Optional — set `edit_distance_json: null` for exact matching only. |
+| Ligation edit-distance dictionary | Parse Biosciences pipeline (`bc_dict_R3_v3.json`) | same shape. Optional. |
+| ADT panel table | **you** — your antibody panel | one row per antibody; a column of tag sequences (all the same length) and a column of display names (must be unique; these become `var_names`). |
+| RT plate layout | **you** — your experiment | one row per used well; a well-ID column and a sample-name column. Wells you omit are labelled `Unassigned`. |
+
+A minimal ADT panel looks like:
+
+```csv
+Barcode,ADT_identifier,Antigen,Clone
+AAGGCAGACGGTGCA,ADT001,CD55,JS11
+GGCTGCGCACCGCCT,ADT002,Vimentin,RV202
+```
+
+and a minimal plate layout:
+
+```csv
+Well_ID,Sample_name
+A1,LineA_24hr_Dosed
+A2,LineA_VEHICLE_24hrs
+```
+
+Any extra columns in either file are carried through to `adata.var` / the
+annotation join, so there is no need to strip them.
+
+---
+
+## Shipped configs
+
+| File | Use it for |
+|---|---|
+| `configs/parse_v3.example.yaml` | **Start here for Parse Evercode WT v3.** Filled-in, working values; edit only the paths. |
+| `configs/annotated_template.yaml` | A teaching template. Every field explained inline, including what breaks if you set it wrong. Describes an invented chemistry to show that read layout, lengths, order and read assignment are all free — do not run it on v3 data. |
+
+---
+
 ## Quickstart
 
 ```bash
-# 1. Copy the example config somewhere OUTSIDE the repo and edit the paths.
+# 1. Copy the example config somewhere OUTSIDE the repo.
 cp configs/parse_v3.example.yaml ~/my_run.yaml
 
-# 2. Edit run.output_dir and everything under inputs: to point at your files.
+# 2. Edit run.output_dir (must be outside the repo) and every path under
+#    inputs: — the FASTQs, the barcode tables, the panel, the plate layout.
 
-# 3. Check the config and all inputs. Reads nothing but the first ~1000 reads
-#    per FASTQ; takes seconds.
+# 3. Check the config and all inputs. Opens only the first ~1000 reads per
+#    FASTQ, so it takes seconds.
 signalseq adt validate --config ~/my_run.yaml
 
-# 4. Run.
+# 4. Smoke-test on a slice before committing to a full run (~1 minute).
+signalseq adt run --config ~/my_run.yaml --sublibrary MY_SUBLIB --debug-reads 5000000
+
+# 5. Run everything, then aggregate.
 signalseq adt run-multi --config ~/my_run.yaml
 ```
 
 Always run `validate` first. It catches a missing file, an off-by-one offset or a
-barcode-length mismatch in seconds, rather than at minute 90 of a long run.
+barcode-length mismatch in seconds, rather than at minute 90 of a long run. Step 4
+is worth the minute: it exercises the whole pipeline, plots included.
+
+**Two things to know about small slices.** `--debug-reads 5000000` is not an
+arbitrary number:
+
+- The barcode census samples reads 3,000,000–4,000,000 by default
+  (`matching.cell_barcode.census.offset_reads` / `n_reads`). A slice shorter than
+  that leaves the census empty, which silently reduces barcode correction to
+  exact matching only. Either keep the slice above ~4M reads, or set
+  `offset_reads: 0`.
+- Cell-calling thresholds tuned for full depth will call very few cells from a
+  slice. If too few pass, CLR/PCA/PHATE is **skipped with a warning** — counts,
+  core QC and the remaining plots are still written — because a kNN embedding over
+  a handful of cells is meaningless. Lower `filtering.min_umi_per_cell` (or set it
+  to `null` for the detected knee) if you want the embedding on a small slice.
+
+### What to expect
+
+Rough figures from a 16 GB laptop, per sublibrary of ~225M read pairs:
+
+| Stage | Time | Peak memory |
+|---|---|---|
+| Barcode census | ~5 s | small |
+| Read scan | ~13 min (~290k reads/s) | ~2 GB |
+| UMI collapse | ~1 min | **~7 GB** (the high-water mark) |
+| Matrix, cell calling, plots | ~1 min | ~2 GB |
+| CLR + PCA + PHATE | ~4 min | ~2 GB |
+
+`run-multi` processes sublibraries **sequentially on purpose**: the UMI-collapse
+sort dominates peak memory, so running them concurrently risks swapping. Four
+sublibraries of this size take roughly 100 minutes end to end.
+
+If `--debug-reads` is small, note that `matching.cell_barcode.census.offset_reads`
+defaults to 3,000,000 — a slice shorter than that leaves the census empty and
+silently reduces barcode correction to exact matching. Set `offset_reads: 0` when
+working with small test files.
 
 ### The four commands
 
@@ -185,6 +270,9 @@ reproduces the original.
 
 ### Adapting to a different chemistry
 
+`configs/annotated_template.yaml` is a complete worked example of this, with every
+field explained inline. The short version:
+
 Suppose a custom chemistry with: a **12 bp** ADT tag on **R2** starting at base
 **5**; a **9 bp** UMI at the **end** of R2; and only **two** barcode rounds, on
 **R1**, of **6 bp** and **10 bp**, drawn from two different plates. Nothing but
@@ -241,6 +329,10 @@ Two constraints to be aware of:
 ---
 
 ## Config reference
+
+`configs/annotated_template.yaml` carries the same information as inline comments,
+which is often easier to work from while editing. The table here is the canonical
+list.
 
 Any section may be omitted, in which case the defaults below apply — and those
 defaults reproduce the pipeline this package was ported from. `read_structure`
@@ -475,6 +567,13 @@ element or reduce whitelist sizes.
 **`qc.analysis.enabled is true, which needs the optional analysis extras`**
 Run `pip install -e '.[analysis]'`, or set `qc.analysis.enabled: false`.
 
+**`WARNING: skipping CLR/PCA/PHATE. Only N cell(s) x M ADT(s) passed filtering`**
+Too few cells were called for an embedding to mean anything, so that stage is
+skipped and everything else is still written. Almost always a full-depth
+`filtering.min_umi_per_cell` applied to a `--debug-reads` slice. Lower it, set it
+to `null` to use the detected knee, or set `qc.analysis.enabled: false` if you only
+want counts.
+
 **Everything validates but almost no reads are assigned.**
 Check the `funnel` figure. If `valid_adt` is high but `valid_all` is low, the cell
 barcode is the problem — confirm the round offsets and that
@@ -482,6 +581,15 @@ barcode is the problem — confirm the round offsets and that
 (with `offset_reads: 3000000`, a file with fewer than ~4M reads gives an empty
 census, so only exact barcode matches are ever accepted). If `valid_adt` itself is
 low, check the ADT offsets and that the panel file matches the antibodies used.
+
+**`Unknown config section(s) ['filterring']`**
+A top-level section name is misspelled. Unknown sections are rejected rather than
+ignored, because a silently dropped `filtering:` block would quietly revert your
+thresholds to defaults.
+
+**`compatibility: this section no longer exists`**
+An older config. The two ported defects are now fixed unconditionally; delete the
+section. See *Differences from the original pipeline*.
 
 **`--sublibrary is required when the config lists more than one`**
 Either name one with `--sublibrary`, or use `run-multi` to process them all.
@@ -554,7 +662,8 @@ pytest                                   # synthetic FASTQs, no real data needed
 
 Tests build their own FASTQs in-test against two deliberately different read
 structures, so extraction is exercised under more than one chemistry rather than
-only the one this package was ported from.
+only the one this package was ported from. Both shipped configs are also parsed
+and structurally validated by the suite, so they cannot drift from the code.
 
 To check a run against a reference run:
 

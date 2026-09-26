@@ -218,3 +218,40 @@ def test_pca_random_state_is_pinned(v3like, out_dir):
     from signalseq.config import load_config
     cfg = load_config(v3like.write_config(out_dir))
     assert cfg.qc["analysis"]["pca_random_state"] == 0
+
+
+def test_too_few_cells_skips_analysis_instead_of_crashing(v3like, out_dir):
+    """A strict threshold on a small slice must not abort after the costly work.
+
+    Previously this died inside the PCA solver with a message about component
+    counts, losing the whole run.
+    """
+    cfg_path = v3like.write_config(out_dir, filtering={"min_umi_per_cell": 10**9},
+                                   qc={"analysis": {"enabled": True}})
+    assert _run(["adt", "run", "--config", str(cfg_path), "--sublibrary", "SubA"]) == 0
+
+    sub = out_dir / "SubA"
+    # Counts and core QC still land.
+    assert (sub / "SubA_raw.h5ad").is_file()
+    assert (sub / "SubA_filtered.h5ad").is_file()
+    assert (sub / "SubA_qc_stats.json").is_file()
+    filtered = ad.read_h5ad(sub / "SubA_filtered.h5ad")
+    assert filtered.n_obs == 0 or filtered.n_obs < 10
+    # But no embedding was produced.
+    assert "X_pca" not in filtered.obsm
+    assert "X_phate" not in filtered.obsm
+
+
+def test_analysis_component_count_is_capped_by_both_dimensions():
+    """n_comps must respect n_obs as well as n_vars."""
+    import numpy as np
+    import anndata as ad_mod
+    from signalseq.analysis import effective_n_comps
+
+    cfg = {"n_pcs": 10}
+    small_cells = ad_mod.AnnData(X=np.ones((4, 14), dtype="float32"))
+    assert effective_n_comps(small_cells, cfg) == 3      # capped by n_obs - 1
+    small_vars = ad_mod.AnnData(X=np.ones((500, 3), dtype="float32"))
+    assert effective_n_comps(small_vars, cfg) == 2       # capped by n_vars - 1
+    plenty = ad_mod.AnnData(X=np.ones((500, 14), dtype="float32"))
+    assert effective_n_comps(plenty, cfg) == 10          # the configured value
