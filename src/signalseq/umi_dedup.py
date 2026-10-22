@@ -87,11 +87,12 @@ def _collapse_all_groups(umi_codes, read_counts, group_start, group_sizes,
 
 
 def collapse_umis(cell_id_arr: np.ndarray, adt_idx_arr: np.ndarray, umi_packed_arr: np.ndarray,
-                  encoder: Encoder, umi_cfg: dict):
+                  encoder: Encoder, umi_cfg: dict, return_reads: bool = False):
     """Collapse reads to molecules.
 
     Returns (cell_id, adt_idx, count): one row per surviving (cell, ADT) pair
-    with its UMI-collapsed molecule count.
+    with its UMI-collapsed molecule count. With `return_reads`, a fourth array
+    holds the pair's pre-collapse read count.
     """
     composite = encoder.pack_composite(cell_id_arr, adt_idx_arr, umi_packed_arr)
     distinct_keys, read_counts = np.unique(composite, return_counts=True)
@@ -120,4 +121,8 @@ def collapse_umis(cell_id_arr: np.ndarray, adt_idx_arr: np.ndarray, umi_packed_a
         )
 
     cell_out, adt_out = encoder.unpack_cell_adt(group_keys)
+    if return_reads:
+        reads = (np.add.reduceat(read_counts, group_start) if len(group_start)
+                 else np.zeros(0, dtype=np.int64))
+        return cell_out, adt_out, final_counts, reads
     return cell_out, adt_out, final_counts

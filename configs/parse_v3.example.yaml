@@ -5,7 +5,8 @@
 #     signalseq adt validate   --config my_config.yaml
 #     signalseq adt run-multi  --config my_config.yaml
 #
-# Every value below reproduces the original parsev3_pipeline exactly.
+# The matching and filtering values reproduce the original parsev3_pipeline;
+# cells are named, and RT primers merged by well, as split-pipe does.
 # All read coordinates are 1-BASED and INCLUSIVE of `start`.
 # ===========================================================================
 
@@ -23,17 +24,26 @@ run:
 inputs:
   # `run --sublibrary NAME` picks one of these; `run-multi` processes all of
   # them in listed order and then aggregates.
+  #
+  # parse_index is the N in split-pipe's "__sN" cell-barcode suffix: the
+  # position of the matching RNA sublibrary in your `split-pipe --mode comb`
+  # run. It MUST match that run, or ADT and RNA cells will not line up when
+  # merged. The values below are placeholders in listed order -- check them.
   sublibraries:
     - name: Sublibrary_3
+      parse_index: 1
       r1: /PATH/TO/fastq/ADT_Sublibrary_3_S5_R1_001.fastq.gz
       r2: /PATH/TO/fastq/ADT_Sublibrary_3_S5_R2_001.fastq.gz
     - name: Sublibrary_4
+      parse_index: 2
       r1: /PATH/TO/fastq/ADT_Sublibrary_4_S6_R1_001.fastq.gz
       r2: /PATH/TO/fastq/ADT_Sublibrary_4_S6_R2_001.fastq.gz
     - name: Sublibrary_6
+      parse_index: 3
       r1: /PATH/TO/fastq/ADT_Sublibrary_6_S7_R1_001.fastq.gz
       r2: /PATH/TO/fastq/ADT_Sublibrary_6_S7_R2_001.fastq.gz
     - name: Sublibrary_7
+      parse_index: 4
       r1: /PATH/TO/fastq/ADT_Sublibrary_7_S8_R1_001.fastq.gz
       r2: /PATH/TO/fastq/ADT_Sublibrary_7_S8_R2_001.fastq.gz
 
@@ -50,6 +60,14 @@ inputs:
       well_column: well
       stype_column: stype             # optional; colours the reads-per-RT plot
       edit_distance_json: /PATH/TO/reference/bc_dict_n99_v5.json
+      # Each RT well holds a polyA (T) and a random-hexamer (R) primer, and a
+      # few wells an X primer, each with its own barcode. split-pipe counts
+      # them as one cell per well; so does this. UMIs are collapsed within each
+      # primer type and then summed, and each type's total is kept in obs as
+      # total_counts_<label> / total_reads_<label>. bc1_sequence reports the
+      # well's first-listed (polyA) sequence.
+      merge_by_well: true
+      stype_labels: { T: polyA, R: randhex, X: X }
     bc2_round:
       csv: /PATH/TO/reference/bc_data_ligation.csv
       sequence_column: sequence
@@ -88,15 +106,15 @@ read_structure:
   #     39........50  linker (12bp, not inspected)
   #     51........58  bc1 / RT (8bp)
   #
-  # `obs_label` names this element's columns in adata.obs -- RT_well,
-  # RT_sequence and so on -- keeping the original pipeline's column names while
-  # the elements themselves have clearer names.
+  # `obs_label` names this element's columns in adata.obs -- bc1_well,
+  # bc1_wind, bc1_sequence and so on -- following split-pipe's bc1/bc2/bc3
+  # round naming.
   elements:
     adt: { read: R1, start:  1, length: 15, whitelist: adt_panel, obs_label: ADT }
     umi: { read: R2, start:  1, length: 10, obs_label: UMI }
-    bc3: { read: R2, start: 11, length:  8, whitelist: bc3_round, obs_label: R3 }
-    bc2: { read: R2, start: 31, length:  8, whitelist: bc2_round, obs_label: R2 }
-    rt:  { read: R2, start: 51, length:  8, whitelist: rt_round,  obs_label: RT }
+    bc3: { read: R2, start: 11, length:  8, whitelist: bc3_round, obs_label: bc3 }
+    bc2: { read: R2, start: 31, length:  8, whitelist: bc2_round, obs_label: bc2 }
+    rt:  { read: R2, start: 51, length:  8, whitelist: rt_round,  obs_label: bc1 }
 
   # Constant sequences between the barcode blocks. The original pipeline skips
   # them without inspecting them, so `enabled: false` is what reproduces it --
@@ -123,7 +141,10 @@ read_structure:
   cell_barcode:
     # Rounds combined most-significant first: rt * 96 * 96 + bc2 * 96 + bc3.
     order: [rt, bc2, bc3]
-    name_template: "{sublibrary}_{rt}_{bc2}_{bc3}"
+    # split-pipe's cell names, e.g. "01_45_96__s1": each round's zero-padded
+    # well index (A1=01 ... H12=96), then the sublibrary's parse_index. The
+    # barcode sequences are kept in obs as bc1/bc2/bc3_sequence.
+    name_template: "{rt_wind}_{bc2_wind}_{bc3_wind}__s{parse_index}"
 
 matching:
   adt:
@@ -211,6 +232,7 @@ outputs:
   figures: true              # figures/<name>_*.png
   aggregate:
     combined_anndata: true   # combined/combined_filtered.h5ad
+    combined_raw_anndata: true   # combined/combined_raw.h5ad -- every barcode, counts only
     combined_qc_stats: true
     copy_best_saturation: true
 

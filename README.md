@@ -198,8 +198,17 @@ R2  (58bp sequenced, all 58bp used)
                            checked             checked
 
 Cell barcode = rt * 96 * 96  +  bc2 * 96  +  bc3          (912,384 combinations)
-obs_names    = {sublibrary}_{rt}_{bc2}_{bc3}
+obs_names    = {rt_wind}_{bc2_wind}_{bc3_wind}__s{parse_index}   e.g. 01_45_96__s1
 ```
+
+`obs_names` match split-pipe's cell barcodes, so ADT and RNA objects from the
+same sublibrary can be joined on them directly. Each round's zero-padded well
+index (A1=01 … H12=96) is followed by `__s` and the sublibrary's `parse_index`,
+which must equal its position in your RNA `split-pipe --mode comb` run. As in
+split-pipe, the polyA (T) and random-hexamer (R) RT primers of a well (plus the
+X primers in D8/D9/D11) are one cell: UMIs are collapsed within each primer type
+and then summed. Each type's totals are kept in `obs`, and `bc1_sequence`
+reports the polyA sequence.
 
 ### Adapting to a different chemistry
 
@@ -287,13 +296,16 @@ files can be moved around together.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `sublibraries[]` | list | *required* | One entry per sublibrary: `name`, `r1`, `r2`. Names must be unique. |
+| `sublibraries[]` | list | *required* | One entry per sublibrary: `name`, `r1`, `r2`, optional `parse_index`. Names must be unique. |
+| `sublibraries[].parse_index` | int \| null | `null` | N of split-pipe's `__sN` suffix for this sublibrary. Required when `name_template` uses `{parse_index}`; must be unique. |
 | `whitelists.<id>` | map | *required* | Named barcode whitelists, referenced from `read_structure.elements.*.whitelist`. |
 | `whitelists.<id>.csv` | path | *required* | Whitelist table. |
 | `whitelists.<id>.sequence_column` | str | `sequence` | Column holding barcode sequences. All must be the same length. |
 | `whitelists.<id>.well_column` | str \| null | `well` | Column holding well IDs. Falls back to the sequence when null. |
 | `whitelists.<id>.stype_column` | str \| null | `null` | Optional sample-type column; colours the reads-per-barcode plot. |
 | `whitelists.<id>.edit_distance_json` | path \| null | `null` | Parse precomputed edit-distance dictionary. Null means exact matching only. |
+| `whitelists.<id>.merge_by_well` | bool | `false` | Collapse every barcode sharing a well onto one cell, with the first-listed barcode as canonical. UMIs are deduplicated per primer type, then summed. At most one round. |
+| `whitelists.<id>.stype_labels` | map | `{}` | Display name per stype value, used for the `total_counts_<label>` / `total_reads_<label>` columns a merge adds. Unlisted values are used as-is. |
 | `adt_panel.csv` | path | *required* | Antibody panel table. |
 | `adt_panel.barcode_column` | str | `Barcode` | Column holding tag sequences. |
 | `adt_panel.name_column` | str | `Antigen` | Column that becomes `var_names`. Must be unique. |
@@ -318,11 +330,11 @@ distinct plates per round needs no code change.
 | `elements.<id>.start` | int | *required* | 1-based first base. |
 | `elements.<id>.length` | int | *required* | Length in bases. Must match the whitelist file's barcode length. |
 | `elements.<id>.whitelist` | str \| null | `null` | Whitelist name, or `adt_panel` for the tag. Required for barcode rounds. |
-| `elements.<id>.obs_label` | str \| null | element id | Prefix for `obs` columns (`<label>_well`, `<label>_sequence`). |
+| `elements.<id>.obs_label` | str \| null | element id | Prefix for `obs` columns (`<label>_well`, `<label>_wind`, `<label>_sequence`). |
 | `elements.<id>.allow_overlap` | bool | `false` | Permit overlapping this element with another. |
 | `linkers[]` | list | `[]` | Constant sequences: `name`, `read`, `start`, `length`, `sequence`, `max_mismatches`, `enabled`. |
 | `cell_barcode.order` | list | *required* | Barcode rounds, most significant first. Defines the packing radix and the `obs_names` order. |
-| `cell_barcode.name_template` | str | `{sublibrary}_{round}_…` | Template for `obs_names`. May reference `{sublibrary}` and any round by id or label. |
+| `cell_barcode.name_template` | str | `{sublibrary}_{round}_…` | Template for `obs_names`. May reference `{sublibrary}`, `{parse_index}`, and per round (by id or label) `{rt}` (sequence), `{rt_well}` and `{rt_wind}` (zero-padded well index). Checked at load. |
 
 ### `matching`
 
@@ -417,6 +429,7 @@ treatment `Unknown` and a missing timepoint, rather than failing the run.
 | `outputs.qc_stats` | bool | `true` | Write `<name>_qc_stats.json`. |
 | `outputs.figures` | bool | `true` | Write the `figures/` PNGs. |
 | `outputs.aggregate.combined_anndata` | bool | `true` | Write `combined/combined_filtered.h5ad`. |
+| `outputs.aggregate.combined_raw_anndata` | bool | `true` | Write `combined/combined_raw.h5ad`: every candidate barcode from every sublibrary, raw counts, no CLR/PCA/PHATE. Needs `outputs.raw_anndata`. |
 | `outputs.aggregate.combined_qc_stats` | bool | `true` | Write `combined/combined_qc_stats.json`. |
 | `outputs.aggregate.copy_best_saturation` | bool | `true` | Copy the best sublibrary's saturation curve into `combined/`. |
 | `performance.chunk_rows` | int | `25000000` | Rows per preallocated numpy buffer in the read scan. |
@@ -437,15 +450,21 @@ Per sublibrary, under `<output_dir>/<sublibrary>/`:
 | `resolved_config.yaml` | The fully merged config actually used, defaults included. |
 | `provenance.json` | Package version, git commit and dirty flag, dependency versions, Python and platform, the derived read structure, timestamp. |
 
-`obs` carries `<label>_well` and `<label>_sequence` per barcode round,
-`cell_id_packed`, `total_counts`, `n_adts_detected`, and the sample annotation
-(`sample_name`, `culture_type`, `timepoint_hrs`, `treatment`, `condition`).
+`obs` carries `<label>_well`, `<label>_wind` and `<label>_sequence` per barcode
+round (the sequences rebuild the old sequence-style barcode), `cell_id_packed`,
+`total_counts` (UMIs), `total_reads` (reads with a resolved ADT tag and cell
+barcode, before UMI collapse), `n_adts_detected`, and the sample annotation
+(`sample_name`, `culture_type`, `timepoint_hrs`, `treatment`, `condition`). With
+a well merge it also carries `total_counts_<label>` and `total_reads_<label>`
+per primer type, e.g. `total_counts_polyA` and `total_counts_randhex`; the UMI
+columns sum exactly to `total_counts`.
 `var` carries the panel columns plus `total_counts`, `n_cells_detected`,
 `detection_rate`.
 
-Aggregated output lands in `<output_dir>/combined/`, with CLR/PCA/PHATE rerun
-jointly on the pooled raw counts so cells from different sublibraries are
-directly comparable.
+Aggregated output lands in `<output_dir>/combined/`: `combined_filtered.h5ad`
+(called cells, with CLR/PCA/PHATE rerun jointly on the pooled raw counts so cells
+from different sublibraries are directly comparable) and `combined_raw.h5ad`
+(every candidate barcode, raw counts only).
 
 ### The figures
 

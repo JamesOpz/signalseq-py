@@ -4,6 +4,9 @@ The called-cell set is fixed (taken from the full-depth call), raw pre-collapse
 reads are subsampled at increasing fractions, and per-cell complexity is
 recomputed at each depth. This reuses the per-read arrays already in memory
 right after the read scan, so no extra FASTQ pass is needed.
+
+With a well merge, UMIs are collapsed per primer type and then summed per well,
+exactly as for the full-depth matrix.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ import pandas as pd
 
 from .encoding import Encoder
 from .umi_dedup import collapse_umis
+from .well_merge import WellMerge, sum_by_cell_adt
 
 
 def compute_saturation_curve(cell_id_arr: np.ndarray, adt_idx_arr: np.ndarray,
@@ -21,10 +25,15 @@ def compute_saturation_curve(cell_id_arr: np.ndarray, adt_idx_arr: np.ndarray,
                              encoder: Encoder,
                              umi_cfg: dict,
                              fractions,
-                             seed: int) -> pd.DataFrame:
+                             seed: int,
+                             merge: WellMerge | None = None) -> pd.DataFrame:
     """One row per fraction: reads used, mean reads/cell, median UMIs/cell,
-    median ADTs detected/cell, and sequencing saturation."""
-    called_set = np.isin(cell_id_arr, called_cell_ids)
+    median ADTs detected/cell, and sequencing saturation.
+
+    `called_cell_ids` are the matrix's (merged, when `merge` is given) cell ids.
+    """
+    read_cell_ids = called_cell_ids if merge is None else merge.members(called_cell_ids)
+    called_set = np.isin(cell_id_arr, read_cell_ids)
     cell_id_c = cell_id_arr[called_set]
     adt_idx_c = adt_idx_arr[called_set]
     umi_c = umi_packed_arr[called_set]
@@ -46,6 +55,10 @@ def compute_saturation_curve(cell_id_arr: np.ndarray, adt_idx_arr: np.ndarray,
         cell_sub, adt_sub, count_sub = collapse_umis(
             cell_id_c[sub_idx], adt_idx_c[sub_idx], umi_c[sub_idx], encoder, umi_cfg
         )
+        if merge is not None:
+            cell_sub, adt_sub, count_sub = sum_by_cell_adt(
+                merge.merge(cell_sub), adt_sub, encoder.n_adts, count_sub
+            )
 
         pos = np.searchsorted(sorted_called_ids, cell_sub)
         per_cell_umi = np.zeros(n_called_cells, dtype=np.int64)

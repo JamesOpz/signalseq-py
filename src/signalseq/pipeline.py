@@ -20,6 +20,7 @@ from .config import Config
 from .encoding import Encoder
 from .hot_loop import scan_sublibrary
 from .umi_dedup import collapse_umis
+from .well_merge import WellMerge
 from .whitelists import load_all
 
 
@@ -53,6 +54,10 @@ def process_sublibrary(cfg: Config, name: str, debug_reads: int | None = None) -
         [whitelists[el.name].n for el in rs.rounds], panel.n, rs.umi.length
     )
     log(f"Encoding: {encoder.describe()}")
+    merge = WellMerge.build(rs, whitelists, cfg.whitelists, encoder)
+    if merge is not None:
+        log(f"Merging barcodes that share a well (per-primer columns: "
+            f"{', '.join(merge.type_labels) or 'none'})")
 
     barcode_read = rs.rounds[0].read
     barcode_path = sub.read_path(barcode_read)
@@ -79,14 +84,16 @@ def process_sublibrary(cfg: Config, name: str, debug_reads: int | None = None) -
 
     log("Collapsing UMIs (vectorized exact + mismatch-tolerant collapse)")
     umi_cfg = cfg.matching["umi"]
-    cell_out, adt_out, counts = collapse_umis(cell_id, adt_idx, umi, encoder, umi_cfg)
+    cell_out, adt_out, counts, pair_reads = collapse_umis(
+        cell_id, adt_idx, umi, encoder, umi_cfg, return_reads=True
+    )
     log(f"{len(cell_out):,} distinct (cell,ADT) pairs; {counts.sum():,} molecules "
         f"({100*(1 - counts.sum()/max(len(cell_id),1)):.1f}% UMI duplication)")
 
     log("Building raw sparse AnnData")
     raw_adata = matrix_build.build_raw_anndata(
-        cell_out, adt_out, counts, rs, panel, whitelists, encoder,
-        stats, reads_per_round, name,
+        cell_out, adt_out, counts, pair_reads, rs, panel, whitelists, encoder,
+        stats, reads_per_round, name, parse_index=sub.parse_index, merge=merge,
     )
 
     log(f"Annotating sample identity from {cfg.layout.csv.name}")
@@ -140,6 +147,7 @@ def process_sublibrary(cfg: Config, name: str, debug_reads: int | None = None) -
             cell_id, adt_idx, umi, called_ids, encoder, umi_cfg,
             fractions=cfg.qc["saturation"]["fractions"],
             seed=int(cfg.qc["saturation"]["seed"]),
+            merge=merge,
         )
         if outputs["saturation_table"]:
             saturation_df.to_csv(f"{prefix}_saturation.csv", index=False)
@@ -212,6 +220,11 @@ def _build_qc_stats(name, stats, raw_adata, filtered, counts, cell_id,
             "total_umis_called_cells": float(filtered.obs["total_counts"].sum()),
             "median_umis_per_cell": float(np.median(filtered.obs["total_counts"])) if filtered.n_obs else 0.0,
             "median_adts_per_cell": float(np.median(filtered.obs["n_adts_detected"])) if filtered.n_obs else 0.0,
+            "median_reads_per_cell": float(np.median(filtered.obs["total_reads"])) if filtered.n_obs else 0.0,
+            "umis_called_cells_by_primer": {
+                col.removeprefix("total_counts_"): float(filtered.obs[col].sum())
+                for col in filtered.obs.columns if col.startswith("total_counts_")
+            },
             "umi_duplication_rate": float(1 - counts.sum() / max(len(cell_id), 1)),
         },
         "knee": {

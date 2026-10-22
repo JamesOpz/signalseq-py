@@ -60,6 +60,11 @@ inputs:
   # `adt run-multi` processes all of them in this order, then aggregates.
   # Names must be unique — they prefix the cell barcodes, which is what keeps
   # barcodes from different sublibraries from colliding when combined.
+  #
+  # Optional `parse_index: N` gives the sublibrary's number in split-pipe's
+  # "__sN" cell-barcode suffix; the name template can then use {parse_index}
+  # instead of {sublibrary} so cell names match the Parse RNA output. Values
+  # must be unique.
   sublibraries:
     - name: DemoLib_A
       r1: /PATH/TO/fastq/DemoLib_A_R1_001.fastq.gz
@@ -89,6 +94,12 @@ inputs:
       stype_column: null            # optional extra column (e.g. sample type).
                                     # When set, colours the reads-per-barcode plot
                                     # via qc.plots.stype_colors.
+      # merge_by_well: true collapses every barcode sharing a well onto one cell
+      # (Parse's polyA + random-hexamer RT primers). UMIs are collapsed per
+      # stype, summed per well, and each stype's totals kept in obs as
+      # total_counts_<label> / total_reads_<label>, with labels from
+      # stype_labels (e.g. { T: polyA, R: randhex }). At most one round may set it.
+      merge_by_well: false
       # Precomputed edit-distance dictionary (the Parse pipeline ships these).
       # null => EXACT matching only, which is the right choice when you have no
       # such file. With a file, mismatches up to
@@ -155,7 +166,8 @@ read_structure:
     # whitelist: name from inputs.whitelists, or `adt_panel` for the tag.
     #            Required for every cell-barcode round.
     # obs_label: prefix for this element's obs columns —
-    #            obs["<obs_label>_well"] and obs["<obs_label>_sequence"].
+    #            obs["<obs_label>_well"], ["<obs_label>_wind"] (split-pipe's
+    #            zero-padded well index) and ["<obs_label>_sequence"].
     #            Defaults to the element name.
     adt: { read: R2, start:  5, length: 12, whitelist: adt_panel,   obs_label: ADT }
     umi: { read: R2, start: 21, length:  8,                         obs_label: UMI }
@@ -192,12 +204,14 @@ read_structure:
     # project if you compare runs.
     order: [cb1, cb2]
 
-    # How obs_names are built. May reference {sublibrary} and any round, by
-    # element name or obs_label.
+    # How obs_names are built. May reference {sublibrary}, {parse_index} and any
+    # round, by element name or obs_label: {cb1} is its sequence, {cb1_well}
+    # its well, {cb1_wind} its zero-padded well index. split-pipe's own format
+    # is "{rt_wind}_{bc2_wind}_{bc3_wind}__s{parse_index}".
     #
-    # KEEP {sublibrary} IN THIS TEMPLATE: without it, identical barcodes from
-    # different sublibraries collide and aggregation fails with a duplicate-
-    # barcode error.
+    # KEEP {sublibrary} OR {parse_index} IN THIS TEMPLATE: without one,
+    # identical barcodes from different sublibraries collide and aggregation
+    # fails with a duplicate-barcode error.
     name_template: "{sublibrary}_{cb1}_{cb2}"
 
 
@@ -384,6 +398,7 @@ outputs:
   figures: true                   # figures/<name>_*.png
   aggregate:
     combined_anndata: true        # combined/combined_filtered.h5ad
+    combined_raw_anndata: true    # combined/combined_raw.h5ad — every barcode, counts only
     combined_qc_stats: true
     copy_best_saturation: true    # copy the best sublibrary's curve into combined/
 
