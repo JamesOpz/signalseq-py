@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import os
+import string
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -95,6 +96,7 @@ DEFAULTS: dict[str, Any] = {
         "figures": True,
         "aggregate": {
             "combined_anndata": True,
+            "combined_raw_anndata": True,
             "combined_qc_stats": True,
             "copy_best_saturation": True,
         },
@@ -134,6 +136,10 @@ class Sublibrary:
     name: str
     r1: Path
     r2: Path
+    # The N of split-pipe's "__sN" cell-barcode suffix for this sublibrary, so
+    # obs_names can match the RNA side. Only required when the name template
+    # uses {parse_index}.
+    parse_index: int | None = None
 
     def read_path(self, read: str) -> Path:
         return self.r1 if read.upper() == "R1" else self.r2
@@ -155,6 +161,12 @@ class WhitelistSpec:
     well_column: str | None
     stype_column: str | None
     edit_distance_json: Path | None
+    # Collapse every barcode sharing a well onto one cell (Parse's polyA +
+    # random-hexamer RT primers), as split-pipe does. The first whitelist row
+    # for a well is the canonical one reported in `<label>_sequence`.
+    merge_by_well: bool = False
+    # Display name per stype value, for the per-primer obs columns.
+    stype_labels: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def cache_key(self) -> tuple:
@@ -347,11 +359,21 @@ def load_config(path: str | Path) -> Config:
         if sname in seen:
             raise ConfigError(f"{what}.name: duplicate sublibrary name {sname!r}")
         seen.add(sname)
+        pidx = s.get("parse_index")
+        if pidx is not None and (not isinstance(pidx, int) or isinstance(pidx, bool) or pidx < 1):
+            raise ConfigError(f"{what}.parse_index: expected an integer >= 1, got {pidx!r}")
         sublibraries.append(Sublibrary(
             name=sname,
             r1=_resolve(_require(s, "r1", what), base, f"{what}.r1"),
             r2=_resolve(_require(s, "r2", what), base, f"{what}.r2"),
+            parse_index=pidx,
         ))
+    pidxs = [s.parse_index for s in sublibraries if s.parse_index is not None]
+    if len(pidxs) != len(set(pidxs)):
+        raise ConfigError(
+            f"inputs.sublibraries: parse_index values must be unique, got {pidxs}; "
+            f"two sublibraries would produce the same '__sN' cell names"
+        )
 
     wl_raw = inputs.get("whitelists") or {}
     if not wl_raw:
@@ -362,6 +384,16 @@ def load_config(path: str | Path) -> Config:
         if not isinstance(w, Mapping):
             raise ConfigError(f"{what}: expected a mapping")
         ed = w.get("edit_distance_json")
+        merge = w.get("merge_by_well", False)
+        if not isinstance(merge, bool):
+            raise ConfigError(f"{what}.merge_by_well: expected true or false, got {merge!r}")
+        if merge and w.get("well_column", "well") is None:
+            raise ConfigError(
+                f"{what}.merge_by_well: needs a well_column, since barcodes are merged by well"
+            )
+        stype_labels = w.get("stype_labels") or {}
+        if not isinstance(stype_labels, Mapping):
+            raise ConfigError(f"{what}.stype_labels: expected a mapping of stype -> label")
         whitelists[str(wname)] = WhitelistSpec(
             name=str(wname),
             csv=_resolve(_require(w, "csv", what), base, f"{what}.csv"),
@@ -371,6 +403,8 @@ def load_config(path: str | Path) -> Config:
             edit_distance_json=(
                 None if ed is None else _resolve(ed, base, f"{what}.edit_distance_json")
             ),
+            merge_by_well=merge,
+            stype_labels={str(k): str(v) for k, v in stype_labels.items()},
         )
 
     panel_raw = inputs.get("adt_panel") or {}
@@ -405,6 +439,14 @@ def load_config(path: str | Path) -> Config:
             f"read_structure.elements.{read_structure.adt.name}.whitelist: the ADT element "
             f"should reference 'adt_panel'"
         )
+
+    merged = [el.name for el in read_structure.rounds if whitelists[el.whitelist].merge_by_well]
+    if len(merged) > 1:
+        raise ConfigError(
+            f"inputs.whitelists.*.merge_by_well: at most one barcode round may merge by well, "
+            f"but rounds {merged} all do"
+        )
+    _validate_name_template(read_structure, sublibraries)
 
     _validate_matching(raw["matching"])
     _validate_filtering(raw["filtering"])
@@ -445,6 +487,35 @@ def _check_sections(user: Mapping) -> None:
             f"{sorted(KNOWN_SECTIONS)}. Check for a typo -- an unrecognised "
             f"section would otherwise be silently ignored."
         )
+
+
+def _validate_name_template(read_structure: ReadStructure,
+                            sublibraries: list[Sublibrary]) -> None:
+    """Check the obs_names template up front: a bad field would otherwise only
+    surface after the read scan, an hour into a run."""
+    template = read_structure.name_template
+    allowed = {"sublibrary", "parse_index"}
+    for el in read_structure.rounds:
+        for key in {el.name, el.label}:
+            allowed |= {key, f"{key}_well", f"{key}_wind"}
+    try:
+        fields = {f for _, f, _, _ in string.Formatter().parse(template) if f is not None}
+    except ValueError as exc:
+        raise ConfigError(f"read_structure.cell_barcode.name_template: {exc}") from exc
+    unknown = sorted(fields - allowed)
+    if unknown:
+        raise ConfigError(
+            f"read_structure.cell_barcode.name_template: unknown field(s) {unknown}. "
+            f"Allowed: {sorted(allowed)}"
+        )
+    if "parse_index" in fields:
+        missing = [s.name for s in sublibraries if s.parse_index is None]
+        if missing:
+            raise ConfigError(
+                f"read_structure.cell_barcode.name_template uses {{parse_index}}, but "
+                f"inputs.sublibraries {missing} set no parse_index. Give each sublibrary the "
+                f"N of its '__sN' suffix in the RNA split-pipe combine run."
+            )
 
 
 def _validate_matching(m: Mapping) -> None:

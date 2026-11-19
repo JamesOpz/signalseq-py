@@ -1,4 +1,7 @@
-"""Combine per-sublibrary filtered AnnData objects into one aggregated object.
+"""Combine per-sublibrary AnnData objects into aggregated objects.
+
+Two are written: the called cells (`combined_filtered.h5ad`) and, optionally,
+every candidate barcode (`combined_raw.h5ad`, raw counts only).
 
 CLR/PCA/PHATE is rerun jointly on the pooled raw counts rather than reusing the
 per-sublibrary embeddings, so cells from different sublibraries are directly
@@ -35,6 +38,44 @@ def _find_sublibrary_files(sub_dir: Path) -> tuple[Path, Path]:
             f"Run `signalseq adt run --sublibrary <name>` for it first."
         )
     return h5ad[0], stats[0]
+
+
+def _find_raw_h5ad(sub_dir: Path) -> Path:
+    h5ad = sorted(sub_dir.glob("*_raw.h5ad"))
+    if not h5ad:
+        raise ConfigError(
+            f"Expected *_raw.h5ad in {sub_dir} for the combined unfiltered object. "
+            f"Set outputs.raw_anndata: true and rerun the sublibrary, or set "
+            f"outputs.aggregate.combined_raw_anndata: false."
+        )
+    return h5ad[0]
+
+
+def _concat(adatas: list, keys: list[str]) -> ad.AnnData:
+    combined = ad.concat(adatas, join="outer", label="sublibrary_source",
+                         keys=keys, index_unique=None)
+    combined.var = adatas[0].var
+    n_dup = combined.obs_names.duplicated().sum()
+    if n_dup:
+        raise ConfigError(
+            f"{n_dup} duplicate cell barcodes across sublibraries. Check that "
+            f"read_structure.cell_barcode.name_template includes {{sublibrary}} or "
+            f"{{parse_index}}, and that every parse_index is distinct."
+        )
+    return combined
+
+
+def _write_combined_raw(sublibrary_dirs: list[Path], keys: list[str], path: str) -> None:
+    """Every candidate barcode from every sublibrary, raw counts and obs only."""
+    raws = []
+    for sub_dir in sublibrary_dirs:
+        raw_path = _find_raw_h5ad(Path(sub_dir))
+        log(f"Loading {raw_path}")
+        raws.append(sc.read_h5ad(raw_path))
+    combined_raw = _concat(raws, keys)
+    combined_raw.write(path)
+    log(f"Combined unfiltered: {combined_raw.n_obs:,} barcodes x {combined_raw.n_vars} ADTs "
+        f"-> {path}")
 
 
 def aggregate(cfg: Config, sublibrary_dirs: list[Path] | None = None) -> Path:
@@ -81,16 +122,12 @@ def aggregate(cfg: Config, sublibrary_dirs: list[Path] | None = None) -> Path:
         stats["_source_dir"] = str(sub_dir)
         all_stats.append(stats)
 
-    log(f"Concatenating {len(adatas)} sublibraries (obs_names already sublibrary-prefixed)")
-    combined = ad.concat(adatas, join="outer", label="sublibrary_source",
-                         keys=[s["sublibrary"] for s in all_stats], index_unique=None)
-    combined.var = adatas[0].var
-    n_dup = combined.obs_names.duplicated().sum()
-    if n_dup:
-        raise ConfigError(
-            f"{n_dup} duplicate cell barcodes across sublibraries after prefixing. "
-            f"Check that read_structure.cell_barcode.name_template includes {{sublibrary}}."
-        )
+    keys = [s["sublibrary"] for s in all_stats]
+    if agg_outputs["combined_raw_anndata"]:
+        _write_combined_raw(sublibrary_dirs, keys, f"{prefix}_raw.h5ad")
+
+    log(f"Concatenating {len(adatas)} sublibraries (obs_names already sublibrary-tagged)")
+    combined = _concat(adatas, keys)
     log(f"Combined: {combined.n_obs:,} cells x {combined.n_vars} ADTs "
         f"from {len(adatas)} sublibraries")
 

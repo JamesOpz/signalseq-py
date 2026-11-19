@@ -18,6 +18,7 @@ file paths, so a chemistry that points two barcode rounds at the same plate file
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from itertools import combinations, product
 from pathlib import Path
@@ -29,6 +30,9 @@ from .config import PanelSpec, WhitelistSpec
 from .readstructure import ConfigError
 
 BASES = (b"A", b"C", b"G", b"T")
+
+_WELL_RE = re.compile(r"^([A-Za-z])0*(\d+)$")
+_PLATE_COLS = 12
 
 
 class WhitelistError(ConfigError):
@@ -68,6 +72,7 @@ class BarcodeWhitelist:
     seqs: list                  # list[bytes]
     seqs_str: np.ndarray        # str array, parallel
     wells: np.ndarray           # well IDs, parallel (falls back to sequences)
+    winds: np.ndarray           # zero-padded 1-based well indexes, as split-pipe names them
     stype: np.ndarray | None    # optional sample-type column
     seq_length: int
     edit_dicts: dict            # {edit_distance: {observed_bytes: [true_idx, ...]}}
@@ -209,6 +214,24 @@ def _load_parse_edit_dict(json_path: Path, seq_to_idx: dict, max_edit: int) -> d
     return out
 
 
+def well_indexes(wells) -> np.ndarray:
+    """split-pipe's well index for each well: row-major on a 12-column plate
+    (A1=01, A12=12, B1=13 ... H12=96), zero-padded to 2 digits, or 3 past 99.
+
+    Wells that do not look like plate wells are numbered by first appearance
+    in the whitelist instead, so a non-plate chemistry still gets stable indexes.
+    """
+    matches = [_WELL_RE.match(str(w)) for w in wells]
+    if all(m and 1 <= int(m.group(2)) <= _PLATE_COLS for m in matches):
+        idx = [(ord(m.group(1).upper()) - ord("A")) * _PLATE_COLS + int(m.group(2))
+               for m in matches]
+    else:
+        first_seen: dict = {}
+        idx = [first_seen.setdefault(w, len(first_seen) + 1) for w in wells]
+    width = 3 if max(idx, default=0) > 99 else 2
+    return np.array([f"{i:0{width}d}" for i in idx])
+
+
 _whitelist_cache: dict[tuple, BarcodeWhitelist] = {}
 
 
@@ -221,7 +244,7 @@ def load_barcode_whitelist(spec: WhitelistSpec, max_edit: int) -> BarcodeWhiteli
         if cached.name != spec.name:
             return BarcodeWhitelist(
                 name=spec.name, seqs=cached.seqs, seqs_str=cached.seqs_str, wells=cached.wells,
-                stype=cached.stype, seq_length=cached.seq_length,
+                winds=cached.winds, stype=cached.stype, seq_length=cached.seq_length,
                 edit_dicts=cached.edit_dicts, exact=cached.exact,
             )
         return cached
@@ -280,7 +303,8 @@ def load_barcode_whitelist(spec: WhitelistSpec, max_edit: int) -> BarcodeWhiteli
         edit_dicts = {0: {s: [i] for i, s in enumerate(seqs)}}
 
     wl = BarcodeWhitelist(
-        name=spec.name, seqs=seqs, seqs_str=seqs_str, wells=wells, stype=stype,
+        name=spec.name, seqs=seqs, seqs_str=seqs_str, wells=wells, winds=well_indexes(wells),
+        stype=stype,
         seq_length=lengths[0], edit_dicts=edit_dicts,
         exact={s: i for i, s in enumerate(seqs)},
     )

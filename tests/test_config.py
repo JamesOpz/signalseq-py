@@ -312,3 +312,51 @@ def test_all_example_config_sections_are_recognised():
     for name in ("parse_v3.example.yaml", "annotated_template.yaml"):
         data = yaml.safe_load(open(root / "configs" / name))
         assert set(data) <= KNOWN_SECTIONS, (name, sorted(set(data) - KNOWN_SECTIONS))
+
+
+PARSE_TEMPLATE = "{rt_wind}_{bc2_wind}_{bc3_wind}__s{parse_index}"
+
+
+def test_parse_index_template_needs_every_sublibrary_indexed(v3like, out_dir):
+    path = _write(v3like, out_dir,
+                  read_structure={"cell_barcode": {"name_template": PARSE_TEMPLATE}})
+    with pytest.raises(ConfigError, match="set no parse_index"):
+        load_config(path)
+
+
+def test_duplicate_parse_index_is_refused(v3like, out_dir):
+    path = _write(v3like, out_dir)
+    data = yaml.safe_load(open(path))
+    sub = data["inputs"]["sublibraries"][0]
+    sub["parse_index"] = 1
+    data["inputs"]["sublibraries"].append({**sub, "name": "SubB"})
+    yaml.safe_dump(data, open(path, "w"))
+    with pytest.raises(ConfigError, match="parse_index values must be unique"):
+        load_config(path)
+
+
+def test_unknown_name_template_field_is_refused_at_load(v3like, out_dir):
+    path = _write(v3like, out_dir,
+                  read_structure={"cell_barcode": {"name_template": "{sublibrary}_{rt_wnd}"}})
+    with pytest.raises(ConfigError, match="unknown field"):
+        load_config(path)
+
+
+def test_only_one_round_may_merge_by_well(v3like, out_dir):
+    path = _write(v3like, out_dir, inputs={"whitelists": {
+        "rt_wl": {"merge_by_well": True}, "bc2_wl": {"merge_by_well": True},
+    }})
+    with pytest.raises(ConfigError, match="at most one barcode round"):
+        load_config(path)
+
+
+def test_shipped_example_uses_split_pipe_names_and_merges_rt_primers():
+    data = yaml.safe_load(open(repo_root() / "configs" / "parse_v3.example.yaml"))
+    assert data["read_structure"]["cell_barcode"]["name_template"] == PARSE_TEMPLATE
+    indexes = [s["parse_index"] for s in data["inputs"]["sublibraries"]]
+    assert len(set(indexes)) == len(indexes)
+    rt = data["inputs"]["whitelists"]["rt_round"]
+    assert rt["merge_by_well"] is True
+    assert rt["stype_labels"] == {"T": "polyA", "R": "randhex", "X": "X"}
+    labels = {k: v["obs_label"] for k, v in data["read_structure"]["elements"].items()}
+    assert (labels["rt"], labels["bc2"], labels["bc3"]) == ("bc1", "bc2", "bc3")
